@@ -1,0 +1,38 @@
+{
+  "name": "cosmi-chord",
+  "version": "1.0.0",
+  "description": "Interactive music and visual experience with Phaser",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "webpack serve --open",
+    "build": "webpack",
+    "dev": "webpack serve --mode development --devtool inline-source-map"
+  },
+  "dependencies": {
+    "@magenta/music": "1.23.1",
+    "phaser": "3.88.2"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.26.9",
+    "@babel/preset-env": "^7.26.9",
+    "babel-loader": "^9.2.1",
+    "css-loader": "^7.1.2",
+    "html-loader": "^5.1.0",
+    "html-webpack-plugin": "^5.6.3",
+    "style-loader": "^4.0.0",
+    "webpack": "^5.98.0",
+    "webpack-cli": "^5.1.4",
+    "webpack-dev-server": "^5.0.4",
+    "worker-loader": "^3.0.8",
+    "copy-webpack-plugin": "^12.0.2"
+  },
+  "resolutions": {
+    "minimist": "1.2.8",
+    "static-eval": "3.0.1"
+  },
+  "scripts": {
+    "start": "webpack serve --open",
+    "build": "webpack",
+    "dev": "webpack --mode development && webpack serve --mode development --devtool inline-source-map"
+  }
+}

@@ -3,19 +3,70 @@ import { createAudioContext, createOscillator, updateVolume } from '../utils/aud
 import { createUI, updateUI, handleUIEvents, toggleMenu, resetScene } from '../utils/visualUtils';
 import { themes, activeTheme } from '../config/themes';
 
+// Lägg till några konstanter för visuell respons
+const VISUAL_MODES = {
+  CALM: 'calm',         // Mjuka, långsamma visualiseringar
+  HARMONIC: 'harmonic', // Strukturerade, harmoniska mönster
+  ENERGETIC: 'energetic', // Livliga, snabba mönster
+  CHAOTIC: 'chaotic'    // Oförutsägbara, komplexa mönster
+};
+
+const COLOR_PALETTES = {
+  CALM: [0x3498db, 0x2980b9, 0x21618c, 0x1b4f72, 0x2e86c1],
+  HARMONIC: [0x27ae60, 0x2ecc71, 0x58d68d, 0x82e0aa, 0x229954],
+  ENERGETIC: [0xe74c3c, 0xf39c12, 0xd35400, 0xff5733, 0xe67e22],
+  CHAOTIC: [0x8e44ad, 0x9b59b6, 0xaf7ac5, 0xbb8fce, 0x7d3c98]
+};
+
 class CosmiChordScene extends Phaser.Scene {
   constructor() {
     super('CosmiChordScene');
+    this.visualResponses = [];
+    this.currentVisualMode = VISUAL_MODES.CALM;
+    this.lastAnalysisTime = 0;
+    this.visualAnalysisInterval = 2000; // Analysera var 2:a sekund
   }
 
   preload() {
-    const particleGraphics = this.add.graphics();
+    // Grundläggande cirkulär partikel
+    let particleGraphics = this.add.graphics();
     particleGraphics.fillStyle(0xffffff);
     particleGraphics.fillCircle(5, 5, 5);
-    particleGraphics.generateTexture('particle', 10, 10, (texture) => {
-      console.log('Particle texture generated:', texture.key);
-    });
+    particleGraphics.generateTexture('particle', 10, 10);
     particleGraphics.destroy();
+    
+    // Stjärnformad partikel för magisk känsla
+    particleGraphics = this.add.graphics();
+    particleGraphics.fillStyle(0xffffff);
+    const starPoints = [];
+    for (let i = 0; i < 10; i++) {
+      const angle = (i * Math.PI) / 5;
+      const radius = i % 2 === 0 ? 5 : 2;
+      const px = 5 + Math.cos(angle) * radius;
+      const py = 5 + Math.sin(angle) * radius;
+      starPoints.push(new Phaser.Geom.Point(px, py));
+    }
+    particleGraphics.fillPoints(starPoints, true);
+    particleGraphics.generateTexture('starParticle', 10, 10);
+    particleGraphics.destroy();
+    
+    // Glödande partikel med mjuka kanter (förenkla utan gradient)
+    particleGraphics = this.add.graphics();
+    particleGraphics.fillStyle(0xffffff, 1);
+    particleGraphics.fillCircle(5, 5, 5);
+    particleGraphics.fillStyle(0xffffff, 0.5);
+    particleGraphics.fillCircle(5, 5, 7);
+    particleGraphics.generateTexture('glowParticle', 14, 14);
+    particleGraphics.destroy();
+    
+    // Ringformad partikel
+    particleGraphics = this.add.graphics();
+    particleGraphics.lineStyle(1, 0xffffff);
+    particleGraphics.strokeCircle(5, 5, 4);
+    particleGraphics.generateTexture('ringParticle', 10, 10);
+    particleGraphics.destroy();
+    
+    console.log('Alla partikeltexturer genererade');
   }
 
   create() {
@@ -41,19 +92,29 @@ class CosmiChordScene extends Phaser.Scene {
     this.particleCount = 20;
     this.panEnabled = false;
     this.harmonicEnabled = false;
+    this.ambientModeActive = false;
     this.isLive = false;
     this.isPaused = false;
     this.liveTimer = null;
+    this.nodeRadius = 100;
+    this.selectedChord = 0;
+
+    // Skapa reverb-nod för ambient-ljud
+    this.reverbNode = null;
+    this.reverbBuffer = null;
+
+    // Skapa en AI worker för generation av soundscapes
+    this.initializeAIWorker();
 
     this.cameras.main.setBackgroundColor('#000000');
     this.gridSize = 60;
-    this.gridCols = 10;
-    this.gridRows = 10;
+    this.gridCols = 13;
+    this.gridRows = 13;
 
     this.playAreaLeft = 30;
-    this.playAreaRight = 570;
-    this.playAreaTop = 30;
-    this.playAreaBottom = 570;
+    this.playAreaRight = 770;
+    this.playAreaTop = 80;
+    this.playAreaBottom = 770;
 
     let attempts = 0;
     const checkTexture = () => {
@@ -92,30 +153,11 @@ class CosmiChordScene extends Phaser.Scene {
 
     this.setupInputListeners();
 
-    this.matter.world.setBounds(0, 0, 600, 600, 32, true, true, false, true);
+    this.matter.world.setBounds(0, 0, 800, 800, 32, true, true, false, true);
 
     this.defaultFrequencies = this.chordColors[0].frequencies;
 
     this.activeHarmonics = new Map();
-
-    if (typeof Worker !== 'undefined') {
-      this.aiWorker = new Worker('/utils/aiUtils.worker.js');
-      this.aiWorker.onmessage = (e) => {
-        console.log('Received message from AI Worker:', e.data);
-        if (e.data.type === 'controlSequence') {
-          this.handleControlSequence(e.data.sequence);
-        } else if (e.data.type === 'visualFeedback') {
-          this.applyVisualFeedback(e.data.shapes);
-        } else if (e.data.type === 'initialized') {
-          console.log('AI Worker initialized successfully');
-        } else if (e.data.type === 'error') {
-          console.error('AI Worker error:', e.data.message);
-        }
-      };
-      this.aiWorker.postMessage({ type: 'initialize' });
-    } else {
-      console.warn('Web Workers are not supported in this browser. AI features will be disabled.');
-    }
 
     this.bpm = 60;
     this.beatDuration = 60 / this.bpm;
@@ -123,63 +165,113 @@ class CosmiChordScene extends Phaser.Scene {
   }
 
   update() {
+    // Rensa tidigare linjer
     this.connectionGraphics.clear();
 
+    // Uppdatera positioner för shapes
     this.shapes.forEach(shape => {
       if (!shape.currentTween && shape.graphics) {
         shape.graphics.x = shape.x;
         shape.graphics.y = shape.y;
+        
+        // Pulsering i ambient-läge
+        if (this.ambientModeActive) {
+          if (!shape.pulseDirection) {
+            shape.pulseDirection = 1;
+            shape.pulseScale = 1;
+          }
+          
+          shape.pulseScale += 0.001 * shape.pulseDirection;
+          if (shape.pulseScale > 1.05) {
+            shape.pulseDirection = -1;
+          } else if (shape.pulseScale < 0.95) {
+            shape.pulseDirection = 1;
+          }
+          
+          shape.graphics.scale = shape.pulseScale;
+        } else if (!this.ambientModeActive && shape.pulseScale !== 1) {
+          shape.pulseScale = 1;
+          shape.graphics.scale = 1;
+        }
       }
     });
 
-    this.particles.forEach(particle => {
-      if (!particle.body) return;
-
+    // Uppdatera partiklar
+    for (let i = 0; i < this.particles.length; i++) {
+      const particle = this.particles[i];
+      if (!particle.body) continue;
+      
       const velocity = particle.body.velocity;
       const speed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
-
-      if (speed < 0.5) {
-        const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
-        particle.setVelocity(this.particleSpeed * Math.cos(angle), this.particleSpeed * Math.sin(angle));
-      } else if (Math.abs(speed - this.particleSpeed) > 0.1) {
-        const scale = this.particleSpeed / speed;
-        particle.setVelocity(velocity.x * scale, velocity.y * scale);
+      
+      // Justera hastighet för jämnare rörelse
+      if (Math.abs(speed - this.particleSpeed) > 0.5) {
+        const scaleFactor = this.particleSpeed / speed;
+        particle.setVelocity(velocity.x * scaleFactor, velocity.y * scaleFactor);
       }
-
+      
+      // Kantdetektering
       if (particle.x < this.playAreaLeft) {
         particle.x = this.playAreaLeft;
         particle.setVelocity(Math.abs(velocity.x), velocity.y);
-      }
-      if (particle.x > this.playAreaRight) {
+      } else if (particle.x > this.playAreaRight) {
         particle.x = this.playAreaRight;
         particle.setVelocity(-Math.abs(velocity.x), velocity.y);
       }
+      
       if (particle.y < this.playAreaTop) {
         particle.y = this.playAreaTop;
         particle.setVelocity(velocity.x, Math.abs(velocity.y));
-      }
-      if (particle.y > this.playAreaBottom) {
+      } else if (particle.y > this.playAreaBottom) {
         particle.y = this.playAreaBottom;
         particle.setVelocity(velocity.x, -Math.abs(velocity.y));
       }
-    });
+      
+      // Rotation för ambient-läge
+      if (this.ambientModeActive) {
+        if (!particle.rotationSpeed) {
+          particle.rotationSpeed = Phaser.Math.FloatBetween(-0.005, 0.005);
+        }
+        particle.rotation += particle.rotationSpeed;
+      } else if (particle.rotation !== 0) {
+        particle.rotation = 0;
+      }
+    }
 
+    // Rita shapes med bättre grafik
     this.shapes.forEach(shape => {
-      const originalColor = this.getShapeColor(shape.type, activeTheme);
-      shape.graphics.clear();
-      shape.graphics.fillStyle(0x000000, 0.4).fillCircle(4, 4, 22);
-      shape.graphics.fillStyle(originalColor, 0.3).fillCircle(0, 0, 25);
-      shape.graphics.fillStyle(originalColor, 1).fillCircle(0, 0, 20);
+      if (!shape.graphics) return;
+      
+      const color = this.getShapeColor(shape.type, activeTheme);
+      
+      // Endast rita om shapes vid behov
+      if (this.time.now % 5 === 0 || shape.isBlending) {
+        shape.graphics.clear();
+        
+        if (this.ambientModeActive) {
+          // Ambient-läge med mer detalj
+          shape.graphics.fillStyle(0x000000, 0.4).fillCircle(4, 4, 22);
+          shape.graphics.fillStyle(color, 0.2).fillCircle(0, 0, 28);
+          shape.graphics.fillStyle(color, 0.4).fillCircle(0, 0, 24);
+          shape.graphics.fillStyle(color, 1.0).fillCircle(0, 0, 20);
+        } else {
+          // Standard grafik
+          shape.graphics.fillStyle(0x000000, 0.4).fillCircle(4, 4, 22);
+          shape.graphics.fillStyle(color, 0.3).fillCircle(0, 0, 25);
+          shape.graphics.fillStyle(color, 1).fillCircle(0, 0, 20);
+        }
+      }
+      
       shape.isBlending = false;
     });
 
     const directConnections = new Map();
-
     const shapeConnections = new Map();
     this.shapes.forEach(shape => {
       shapeConnections.set(shape, new Set());
     });
 
+    // Rita anslutningar mellan partiklar och shapes
     this.particles.forEach(particle => {
       const connectedShapes = this.shapes.filter(shape => {
         const dist = Phaser.Math.Distance.Between(particle.x, particle.y, shape.x, shape.y);
@@ -190,20 +282,18 @@ class CosmiChordScene extends Phaser.Scene {
         const distance = Phaser.Math.Distance.Between(shape.x, shape.y, particle.x, particle.y);
         if (distance < shape.radius) {
           const lineColor = this.getShapeColor(shape.type, activeTheme);
-          const opacity = Math.pow(1 - (distance / shape.radius), 1.3) * 0.8;
-          this.connectionGraphics.lineStyle(4, lineColor, opacity);
+          
+          // Beräkna opacitet och bredd baserat på avstånd
+          const distanceRatio = distance / shape.radius;
+          const opacity = (1 - distanceRatio) * 0.8;
+          const lineWidth = 2 + (1 - distanceRatio) * 2;
+          
+          // Rita linje med förbättrad stil
+          this.connectionGraphics.lineStyle(lineWidth, lineColor, opacity);
           this.connectionGraphics.beginPath();
           this.connectionGraphics.moveTo(shape.x, shape.y);
           this.connectionGraphics.lineTo(particle.x, particle.y);
           this.connectionGraphics.strokePath();
-
-          const activationLevel = 1 - (distance / shape.radius);
-          const subtleFactor = this.harmonicEnabled ? 0.15 : 0.25;
-          if (activationLevel > 0) {
-            const originalColor = this.getShapeColor(shape.type, activeTheme);
-            const glowSize = 26 + activationLevel * 4 * subtleFactor;
-            shape.graphics.fillStyle(originalColor, 0.15 * activationLevel).fillCircle(0, 0, glowSize);
-          }
         }
       });
 
@@ -225,30 +315,11 @@ class CosmiChordScene extends Phaser.Scene {
         directConnections.get(key1).add(key2);
         directConnections.get(key2).add(key1);
 
+        // Rita förbättrade harmonic-kopplingar
         if (this.harmonicEnabled) {
           const color1 = this.getShapeColor(shape1.type, activeTheme);
-          const color2 = this.getShapeColor(shape2.type, activeTheme);
-
-          const rgb1 = {
-            r: (color1 >> 16) & 0xFF,
-            g: (color1 >> 8) & 0xFF,
-            b: color1 & 0xFF
-          };
-          const rgb2 = {
-            r: (color2 >> 16) & 0xFF,
-            g: (color2 >> 8) & 0xFF,
-            b: color2 & 0xFF
-          };
-
-          const blendedRgb = {
-            r: Math.round((rgb1.r + rgb2.r) / 2),
-            g: Math.round((rgb1.g + rgb2.g) / 2),
-            b: Math.round((rgb1.b + rgb2.b) / 2)
-          };
-
-          const blendedColor = (blendedRgb.r << 16) + (blendedRgb.g << 8) + blendedRgb.b;
-
-          this.connectionGraphics.lineStyle(4, blendedColor, 0.6);
+          
+          this.connectionGraphics.lineStyle(3, color1, 0.5);
           this.connectionGraphics.beginPath();
           this.connectionGraphics.moveTo(shape1.x, shape1.y);
           this.connectionGraphics.lineTo(particle.x, particle.y);
@@ -261,6 +332,7 @@ class CosmiChordScene extends Phaser.Scene {
       }
     });
 
+    // Uppdatera ljudparametrar
     this.shapes.forEach(shape => {
       const shapeKey = `${shape.i},${shape.j}`;
       const connections = directConnections.get(shapeKey) || new Set();
@@ -288,24 +360,20 @@ class CosmiChordScene extends Phaser.Scene {
           const baseFreq = shape.frequency;
 
           if (connectedFreqs.length > 0 && isFinite(baseFreq)) {
-            const targetRatios = [1, 4 / 3, 3 / 2, 2];
-            const closestFreq = connectedFreqs[0];
-            const ratio = closestFreq / baseFreq;
-
-            let bestRatio = targetRatios[0];
-            let minDiff = Math.abs(ratio - bestRatio);
-
-            for (const r of targetRatios) {
-              const diff = Math.abs(ratio - r);
-              if (diff < minDiff) {
-                minDiff = diff;
-                bestRatio = r;
-              }
-            }
-
-            const harmonicFreq = baseFreq * bestRatio;
-            shape.oscillator.frequency.setTargetAtTime(harmonicFreq, this.audioContext.currentTime, 1.5);
-            volume *= 0.8;
+            // Harmoniska intervaller
+            const harmonicIntervals = [1, 5/4, 3/2, 2];
+            
+            // Hitta alla möjliga harmoniska toner genom att analysera frekvensförhållanden
+            const rootFrequency = Math.min(baseFreq, ...connectedFreqs);
+            
+            // Välj en harmonisk ton
+            const interval = harmonicIntervals[Math.floor(Math.random() * harmonicIntervals.length)];
+            const targetFreq = rootFrequency * interval;
+            
+            // Mjuk övergång till den harmoniska tonen
+            shape.oscillator.frequency.setTargetAtTime(targetFreq, this.audioContext.currentTime, 2.0);
+            
+            volume *= 0.9;
           }
         }
       }
@@ -328,514 +396,209 @@ class CosmiChordScene extends Phaser.Scene {
         }
       }
     });
-
+    
+    // Uppdatera beat för timing
     this.currentBeat = Math.floor(this.time.now / 1000 / this.beatDuration) % 4;
   }
-
-  resetShapeToOriginalColor(shape) {
-    const originalColor = this.getShapeColor(shape.type, activeTheme);
+  
+  // Förbättrad updateShapeGraphics
+  updateShapeGraphics(shape) {
+    if (!shape || !shape.graphics) return;
+    
     shape.graphics.clear();
-    shape.graphics.fillStyle(0x000000, 0.4).fillCircle(4, 4, 22);
-    shape.graphics.fillStyle(originalColor, 0.3).fillCircle(0, 0, 25);
-    shape.graphics.fillStyle(originalColor, 1).fillCircle(0, 0, 20);
-  }
-
-  setupInputListeners() {
-    this.input.on('pointerdown', () => {
-      if (!this.audioContext) {
-        this.audioContext = new (window.AudioContext || window.webkitAudioContext)(); // Initiera vid klick
-        console.log('AudioContext initialized');
-        if (this.isLive && this.aiWorker) {
-          this.triggerLiveSoundscape(); // Trigga LIVE direkt efter klick om aktiverat
-        }
-      } else if (this.audioContext.state === 'suspended') {
-        this.audioContext.resume().then(() => {
-          console.log('AudioContext resumed');
-          this.shapes.forEach(shape => {
-            if (shape.oscillator && shape.gain && shape.oscillator.state === 'suspended') {
-              shape.oscillator.start();
-            }
-          });
-          if (this.isLive && this.aiWorker) {
-            this.triggerLiveSoundscape(); // Trigga LIVE vid återupptag
-          }
-        });
+    const color = this.getShapeColor(shape.type, activeTheme);
+    
+    shape.graphics.x = shape.x;
+    shape.graphics.y = shape.y;
+    shape.graphics.setDepth(1);
+    
+    if (this.ambientModeActive) {
+      // Ambient-läge med mer detalj
+      shape.graphics.fillStyle(0x000000, 0.4).fillCircle(4, 4, 22);
+      shape.graphics.fillStyle(color, 0.2).fillCircle(0, 0, 28);
+      shape.graphics.fillStyle(color, 0.4).fillCircle(0, 0, 24);
+      shape.graphics.fillStyle(color, 1.0).fillCircle(0, 0, 20);
+      
+      // Lägg till formspecifika detaljer om möjligt
+      if (shape.type.includes('Triangle')) {
+        const size = 10;
+        shape.graphics.fillStyle(color, 0.7).fillTriangle(-size, size, size, size, 0, -size);
+      } else if (shape.type.includes('Square')) {
+        const size = 8;
+        shape.graphics.fillStyle(color, 0.7).fillRect(-size, -size, size*2, size*2);
       }
-    });
-
-    this.draggedShape = null;
-    this.isDragging = false;
-    this.selectedNoteType = null;
-
-    this.input.keyboard.on('keydown-SHIFT', () => {
-      document.getElementById('renderDiv').style.cursor = 'grab';
-    });
-    ['ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX'].forEach((key, index) => {
-      this.input.keyboard.on(`keydown-${key}`, () => {
-        let customCursor = document.getElementById('customCursor');
-        if (customCursor) customCursor.remove();
-
-        customCursor = document.createElement('div');
-        customCursor.id = 'customCursor';
-        customCursor.style.position = 'fixed';
-        customCursor.style.pointerEvents = 'none';
-        customCursor.style.zIndex = '9999';
-        customCursor.style.userSelect = 'none';
-        customCursor.style.width = '40px';
-        customCursor.style.height = '40px';
-        customCursor.style.borderRadius = '50%';
-        customCursor.style.transform = 'translate(-50%, -50%)';
-
-        const colors = {
-          0: { color: this.getShapeColor('circle', activeTheme), type: 'circle' },
-          1: { color: this.getShapeColor('yellowTriangle', activeTheme), type: 'yellowTriangle' },
-          2: { color: this.getShapeColor('triangle', activeTheme), type: 'triangle' },
-          3: { color: this.getShapeColor('square', activeTheme), type: 'square' },
-          4: { color: this.getShapeColor('purpleSquare', activeTheme), type: 'purpleSquare' },
-          5: { color: this.getShapeColor('orangeSquare', activeTheme), type: 'orangeSquare' }
-        };
-
-        const type = colors[index].type;
-        this.selectedNoteType = type;
-        const rgbColor = {
-          r: (colors[index].color >> 16) & 0xFF,
-          g: (colors[index].color >> 8) & 0xFF,
-          b: colors[index].color & 0xFF
-        };
-        customCursor.style.backgroundColor = `rgba(${rgbColor.r}, ${rgbColor.g}, ${rgbColor.b}, 0.25)`;
-        customCursor.style.border = `2px solid rgb(${rgbColor.r}, ${rgbColor.g}, ${rgbColor.b})`;
-        customCursor.style.boxShadow = `0 0 10px rgba(${rgbColor.r}, ${rgbColor.g}, ${rgbColor.b}, 0.5)`;
-        document.body.appendChild(customCursor);
-        customCursor.style.display = 'block';
-        document.getElementById('renderDiv').style.cursor = 'none';
-        const updatePosition = (e) => {
-          requestAnimationFrame(() => {
-            customCursor.style.left = `${e.clientX}px`;
-            customCursor.style.top = `${e.clientY}px`;
-          });
-        };
-        document.addEventListener('mousemove', updatePosition);
-        this.updateCursorPosition = updatePosition;
-        const currentEvent = this.input.activePointer.event;
-        if (currentEvent) updatePosition(currentEvent);
-      });
-      this.input.keyboard.on(`keyup-${key}`, () => {
-        const customCursor = document.getElementById('customCursor');
-        if (customCursor) customCursor.remove();
-        document.getElementById('renderDiv').style.cursor = 'default';
-        document.removeEventListener('mousemove', this.updateCursorPosition);
-        this.updateCursorPosition = null;
-        this.selectedNoteType = null;
-      });
-    });
-    this.input.keyboard.on('keydown-CTRL', () => {
-      document.getElementById('renderDiv').style.cursor = '➖';
-    });
-    this.input.keyboard.on('keydown-X', () => {
-      let customCursor = document.getElementById('customCursor');
-      if (customCursor) customCursor.remove();
-      customCursor = document.createElement('div');
-      document.getElementById('renderDiv').style.cursor = 'none';
-      customCursor.id = 'customCursor';
-      customCursor.style.position = 'fixed';
-      customCursor.style.fontSize = '16px';
-      customCursor.style.pointerEvents = 'none';
-      customCursor.style.zIndex = '9999';
-      customCursor.style.color = '#ffffff';
-      customCursor.style.userSelect = 'none';
-      customCursor.textContent = '⌫';
-      document.body.appendChild(customCursor);
-      customCursor.style.display = 'block';
-      const updatePosition = (e) => {
-        requestAnimationFrame(() => {
-          customCursor.style.left = `${e.clientX}px`;
-          customCursor.style.top = `${e.clientY}px`;
-        });
-      };
-      const currentEvent = this.input.activePointer.event;
-      if (currentEvent) updatePosition(currentEvent);
-      document.addEventListener('mousemove', updatePosition);
-      this.updateCursorPosition = updatePosition;
-    });
-    this.input.keyboard.on('keyup-X', () => {
-      document.getElementById('renderDiv').style.cursor = 'default';
-      const customCursor = document.getElementById('customCursor');
-      if (customCursor) customCursor.remove();
-      document.removeEventListener('mousemove', this.updateCursorPosition);
-      this.updateCursorPosition = null;
-    });
-    this.input.keyboard.on('keyup-CTRL', () => {
-      if (!this.input.keyboard.checkDown(this.input.keyboard.addKey('X'))) {
-        document.getElementById('renderDiv').style.cursor = 'default';
-      }
-    });
-    this.input.keyboard.on('keyup-SHIFT', () => {
-      document.getElementById('renderDiv').style.cursor = 'default';
-      this.isDragging = false;
-      this.draggedShape = null;
-    });
-
-    this.input.keyboard.on('keydown-Q', () => {
-      const chordIndex = 0;
-      document.getElementById('chordSlider').value = chordIndex;
-      const event = new Event('input');
-      document.getElementById('chordSlider').dispatchEvent(event);
-    });
-    this.input.keyboard.on('keydown-W', () => {
-      const chordIndex = 1;
-      document.getElementById('chordSlider').value = chordIndex;
-      const event = new Event('input');
-      document.getElementById('chordSlider').dispatchEvent(event);
-    });
-    this.input.keyboard.on('keydown-E', () => {
-      const chordIndex = 2;
-      document.getElementById('chordSlider').value = chordIndex;
-      const event = new Event('input');
-      document.getElementById('chordSlider').dispatchEvent(event);
-    });
-    this.input.keyboard.on('keydown-R', () => {
-      const chordIndex = 3;
-      document.getElementById('chordSlider').value = chordIndex;
-      const event = new Event('input');
-      document.getElementById('chordSlider').dispatchEvent(event);
-    });
-    this.input.keyboard.on('keydown-T', () => {
-      const chordIndex = 4;
-      document.getElementById('chordSlider').value = chordIndex;
-      const event = new Event('input');
-      document.getElementById('chordSlider').dispatchEvent(event);
-    });
-    this.input.keyboard.on('keydown-Y', () => {
-      const chordIndex = 5;
-      document.getElementById('chordSlider').value = chordIndex;
-      const event = new Event('input');
-      document.getElementById('chordSlider').dispatchEvent(event);
-    });
-    this.input.keyboard.on('keydown-B', () => {
-      const blendButton = document.getElementById('blendToggle');
-      this.harmonicEnabled = !this.harmonicEnabled;
-      blendButton.textContent = this.harmonicEnabled ? 'On' : 'Off';
-      blendButton.style.background = this.harmonicEnabled ? '#00cc00' : '#333';
-      blendButton.style.width = '60px';
-    });
-    this.input.keyboard.on('keydown-P', () => {
-      const panButton = document.getElementById('panToggle');
-      this.panEnabled = !this.panEnabled;
-      panButton.textContent = this.panEnabled ? 'On' : 'Off';
-      panButton.style.background = this.panEnabled ? '#2ecc71' : '#333';
-      panButton.style.width = '60px';
-      this.shapes.forEach(shape => {
-        if (shape.stereoPanner) {
-          const targetPan = this.panEnabled ? this.calculatePan(shape.i) : 0;
-          shape.stereoPanner.pan.cancelScheduledValues(this.audioContext.currentTime);
-          shape.stereoPanner.pan.setTargetAtTime(targetPan, this.audioContext.currentTime, 0.2);
-        }
-      });
-    });
-
-    this.input.on('pointerdown', (pointer) => {
-      if (this.input.keyboard.checkDown(this.input.keyboard.addKey('X'))) {
-        const clickedShape = this.shapes.find(shape =>
-          Phaser.Math.Distance.Between(pointer.x, pointer.y, shape.x, shape.y) < 25
-        );
-        if (clickedShape) {
-          clickedShape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
-          clickedShape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.01);
-          setTimeout(() => {
-            clickedShape.graphics.destroy();
-            clickedShape.oscillator.stop();
-            clickedShape.oscillator.disconnect();
-            clickedShape.gain.disconnect();
-            if (clickedShape.stereoPanner) clickedShape.stereoPanner.disconnect();
-            this.shapes = this.shapes.filter(shape => shape !== clickedShape);
-          }, 50);
-          return;
-        }
-      } else if (this.input.keyboard.checkDown(this.input.keyboard.addKey('SHIFT'))) {
-        const clickedShape = this.shapes.find(shape =>
-          Phaser.Math.Distance.Between(pointer.x, pointer.y, shape.x, shape.y) < 25
-        );
-        if (clickedShape) {
-          this.draggedShape = clickedShape;
-          this.isDragging = true;
-          document.getElementById('renderDiv').style.cursor = 'grabbing';
-        }
-      } else {
-        this.placeShape(pointer, this.selectedNoteType);
-      }
-    });
-
-    this.input.on('pointermove', (pointer) => {
-      if (this.isDragging && this.draggedShape && this.input.keyboard.checkDown(this.input.keyboard.addKey('SHIFT'))) {
-        const i = Math.floor(pointer.x / this.gridSize);
-        const j = Math.floor(pointer.y / this.gridSize);
-        const clampedI = Math.max(0, Math.min(i, this.gridCols - 1));
-        const clampedJ = Math.max(0, Math.min(j, this.gridRows - 1));
-        const newX = clampedI * this.gridSize + this.gridSize / 2;
-        const newY = clampedJ * this.gridSize + this.gridSize / 2;
-
-        this.draggedShape.x = newX;
-        this.draggedShape.y = newY;
-        this.draggedShape.graphics.setPosition(newX, newY);
-        this.draggedShape.i = clampedI;
-        this.draggedShape.j = clampedJ;
-
-        if (this.draggedShape.gain) {
-          this.draggedShape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
-          this.draggedShape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.01);
-          this.draggedShape.gain.gain.setTargetAtTime(
-            this.draggedShape.baseVolume * this.masterVolume * (this.draggedShape.frequency <= 110 ? 1.5 : 1),
-            this.audioContext.currentTime + 0.01,
-            0.05
-          );
-
-          if (this.panEnabled && this.draggedShape.stereoPanner) {
-            const panValue = this.calculatePan(clampedI);
-            this.draggedShape.stereoPanner.pan.cancelScheduledValues(this.audioContext.currentTime);
-            this.draggedShape.stereoPanner.pan.setTargetAtTime(panValue, this.audioContext.currentTime, 0.1);
-          }
-        }
-      }
-    });
-
-    this.input.on('pointerup', () => {
-      if (this.input.keyboard.checkDown(this.input.keyboard.addKey('SHIFT'))) {
-        document.getElementById('renderDiv').style.cursor = 'grab';
-      }
-      this.isDragging = false;
-      this.draggedShape = null;
-    });
-  }
-
-  placeShape(pointer, selectedType = null) {
-    const i = Math.floor(pointer.x / this.gridSize);
-    const j = Math.floor(pointer.y / this.gridSize);
-
-    if (
-      i * this.gridSize + this.gridSize / 2 < this.playAreaLeft ||
-      i * this.gridSize + this.gridSize / 2 > this.playAreaRight ||
-      j * this.gridSize + this.gridSize / 2 < this.playAreaTop ||
-      j * this.gridSize + this.gridSize / 2 > this.playAreaBottom
-    ) {
-      return;
+    } else {
+      // Standard grafik - bättre än minimal
+      shape.graphics.fillStyle(0x000000, 0.4).fillCircle(4, 4, 22);
+      shape.graphics.fillStyle(color, 0.3).fillCircle(0, 0, 25);
+      shape.graphics.fillStyle(color, 1).fillCircle(0, 0, 20);
     }
+  }
 
-    const x = i * this.gridSize + this.gridSize / 2;
-    const y = j * this.gridSize + this.gridSize / 2;
+  // Återställ lightening-funktion
+  lightenColor(color, percent) {
+    const r = Math.min(255, ((color >> 16) & 0xFF) + percent);
+    const g = Math.min(255, ((color >> 8) & 0xFF) + percent);
+    const b = Math.min(255, (color & 0xFF) + percent);
+    return (r << 16) | (g << 8) | b;
+  }
 
-    const existingShape = this.shapes.find(shape => shape.i === i && shape.j === j);
-    if (existingShape) {
-      if (selectedType) {
-        if (existingShape.type !== selectedType) {
-          const fadeOutTime = 0.1;
-          existingShape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
-          existingShape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.01);
-          setTimeout(() => {
-            let newFrequency, color;
-            switch (selectedType) {
-              case 'circle':
-                newFrequency = this.defaultFrequencies[0];
-                color = this.getShapeColor('circle', activeTheme);
-                break;
-              case 'yellowTriangle':
-                newFrequency = this.defaultFrequencies[1];
-                color = this.getShapeColor('yellowTriangle', activeTheme);
-                break;
-              case 'triangle':
-                newFrequency = this.defaultFrequencies[2];
-                color = this.getShapeColor('triangle', activeTheme);
-                break;
-              case 'square':
-                newFrequency = this.defaultFrequencies[3];
-                color = this.getShapeColor('square', activeTheme);
-                break;
-              case 'purpleSquare':
-                newFrequency = this.defaultFrequencies[4];
-                color = this.getShapeColor('purpleSquare', activeTheme);
-                break;
-              case 'orangeSquare':
-                newFrequency = this.defaultFrequencies[5];
-                color = this.getShapeColor('orangeSquare', activeTheme);
-                break;
-            }
-            existingShape.type = selectedType;
-            existingShape.frequency = newFrequency;
-            existingShape.graphics.clear();
-            existingShape.graphics.fillStyle(0x000000, 0.4).fillCircle(4, 4, 22);
-            existingShape.graphics.fillStyle(color, 0.3).fillCircle(0, 0, 25);
-            existingShape.graphics.fillStyle(color, 1).fillCircle(0, 0, 20);
-            existingShape.oscillator.frequency.cancelScheduledValues(this.audioContext.currentTime);
-            existingShape.oscillator.frequency.setTargetAtTime(newFrequency, this.audioContext.currentTime, 0.1);
-            existingShape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
-            existingShape.gain.gain.setTargetAtTime(
-              existingShape.baseVolume * this.masterVolume * (newFrequency <= 110 ? 1.5 : 1),
-              this.audioContext.currentTime + fadeOutTime,
-              0.1
-            );
-            if (this.panEnabled && existingShape.stereoPanner) {
-              const panValue = this.calculatePan(existingShape.i);
-              existingShape.stereoPanner.pan.cancelScheduledValues(this.audioContext.currentTime);
-              existingShape.stereoPanner.pan.setTargetAtTime(panValue, this.audioContext.currentTime, 0.1);
-            }
-          }, fadeOutTime * 1000);
-        }
+  // Förbättrad setupShapeAudio
+  setupShapeAudio(shape, frequency) {
+    try {
+      // Skapa gain nod
+      shape.gain = this.audioContext.createGain();
+      shape.gain.gain.value = 0;
+      
+      // Förbättrad filter
+      shape.filter = this.audioContext.createBiquadFilter();
+      shape.filter.type = 'lowpass';
+      shape.filter.frequency.value = this.ambientModeActive ? 2000 : 5000;
+      
+      // Stereomixer
+      shape.stereoPanner = this.audioContext.createStereoPanner();
+      shape.stereoPanner.pan.value = this.panEnabled ? this.calculatePan(shape.i) : 0;
+      
+      // Ljudkopplingar
+      shape.oscillator.connect(shape.filter);
+      shape.filter.connect(shape.gain);
+      
+      // Reverb-koppling för ambient-läge
+      if (this.ambientModeActive && this.reverbNode) {
+        // Skapa wet/dry mix för bättre reverb
+        const dryGain = this.audioContext.createGain();
+        const wetGain = this.audioContext.createGain();
+        
+        dryGain.gain.value = 0.6; // 60% torr signal
+        wetGain.gain.value = 0.4; // 40% våt/reverb signal
+        
+        shape.gain.connect(dryGain);
+        shape.gain.connect(this.reverbNode);
+        this.reverbNode.connect(wetGain);
+        
+        dryGain.connect(shape.stereoPanner);
+        wetGain.connect(shape.stereoPanner);
+        
+        shape.dryGain = dryGain;
+        shape.wetGain = wetGain;
+      } else {
+        // Utan reverb för vanligt läge
+        shape.gain.connect(shape.stereoPanner);
+      }
+      
+      shape.stereoPanner.connect(this.audioContext.destination);
+      
+      // Lägg till suboscillator för mer fyllighet i ambient-läge
+      if (this.ambientModeActive) {
+        const subOscillator = this.audioContext.createOscillator();
+        subOscillator.type = 'sine';
+        subOscillator.frequency.value = frequency / 2; // En oktav ner
+        
+        const subGain = this.audioContext.createGain();
+        subGain.gain.value = 0.3; // 30% sub-nivå
+        
+        subOscillator.connect(subGain);
+        subGain.connect(shape.gain);
+        
+        subOscillator.start();
+        shape.subOscillator = subOscillator;
+        shape.subGain = subGain;
+      }
+      
+      // Starta ljud
+      shape.oscillator.start();
+      shape.frequency = frequency;
+      
+      // Sätt initial volym
+      const volumeBoost = frequency <= 110 ? 1.5 : 1;
+      const targetVolume = 0.1 * volumeBoost * this.masterVolume;
+      shape.gain.gain.setTargetAtTime(targetVolume, this.audioContext.currentTime + 0.01, 0.2);
+      shape.baseVolume = 0.1 * volumeBoost;
+    } catch (err) {
+      console.error("Error in setupShapeAudio:", err);
+    }
+  }
+
+  // Förbättrad reverbinitiering
+  initializeReverb() {
+    if (!this.audioContext) return;
+    
+    try {
+      if (this.reverbNode) {
+        console.log("Reverb already initialized");
         return;
       }
-      const fadeOutTime = 0.1;
-      existingShape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
-      existingShape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.01);
-      setTimeout(() => {
-        let newType, newFrequency, color;
-        switch (existingShape.type) {
-          case 'circle':
-            newType = 'yellowTriangle';
-            newFrequency = this.defaultFrequencies[1] || 220;
-            color = this.getShapeColor('yellowTriangle', activeTheme);
-            break;
-          case 'yellowTriangle':
-            newType = 'triangle';
-            newFrequency = this.defaultFrequencies[2] || 330;
-            color = this.getShapeColor('triangle', activeTheme);
-            break;
-          case 'triangle':
-            newType = 'square';
-            newFrequency = this.defaultFrequencies[3] || 440;
-            color = this.getShapeColor('square', activeTheme);
-            break;
-          case 'square':
-            newType = 'purpleSquare';
-            newFrequency = this.defaultFrequencies[4] || 110;
-            color = this.getShapeColor('purpleSquare', activeTheme);
-            break;
-          case 'purpleSquare':
-            newType = 'orangeSquare';
-            newFrequency = this.defaultFrequencies[5] || 55;
-            color = this.getShapeColor('orangeSquare', activeTheme);
-            break;
-          case 'orangeSquare':
-            existingShape.graphics.destroy();
-            existingShape.oscillator.stop();
-            existingShape.oscillator.disconnect();
-            existingShape.gain.disconnect();
-            if (existingShape.stereoPanner) existingShape.stereoPanner.disconnect();
-            this.shapes = this.shapes.filter(shape => shape !== existingShape);
-            return;
+      
+      // Skapa en bättre reverb
+      const convolver = this.audioContext.createConvolver();
+      const duration = 2.0; // 2 sekunder reverb
+      const bufferSize = Math.min(this.audioContext.sampleRate * duration, 48000 * 2);
+      const buffer = this.audioContext.createBuffer(2, bufferSize, this.audioContext.sampleRate);
+      
+      // Skapa impulsrespons
+      for (let channel = 0; channel < 2; channel++) {
+        const channelData = buffer.getChannelData(channel);
+        
+        // Fyll med brus som avtar exponentiellt
+        for (let i = 0; i < bufferSize; i++) {
+          const decay = Math.exp(-i / (bufferSize * 0.33));
+          channelData[i] = (Math.random() * 2 - 1) * decay * 0.1;
         }
-        if (newType) {
-          existingShape.type = newType;
-          existingShape.frequency = newFrequency;
-          existingShape.graphics.clear();
-          existingShape.graphics.fillStyle(0x000000, 0.4).fillCircle(4, 4, 22);
-          existingShape.graphics.fillStyle(color, 0.3).fillCircle(0, 0, 25);
-          existingShape.graphics.fillStyle(color, 1).fillCircle(0, 0, 20);
-          existingShape.oscillator.frequency.cancelScheduledValues(this.audioContext.currentTime);
-          existingShape.oscillator.frequency.setTargetAtTime(newFrequency, this.audioContext.currentTime, 0.1);
-          existingShape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
-          existingShape.gain.gain.setTargetAtTime(
-            existingShape.baseVolume * this.masterVolume * (newFrequency <= 110 ? 1.5 : 1),
-            this.audioContext.currentTime + fadeOutTime,
-            0.1
-          );
-          if (this.panEnabled && existingShape.stereoPanner) {
-            const panValue = this.calculatePan(existingShape.i);
-            existingShape.stereoPanner.pan.cancelScheduledValues(this.audioContext.currentTime);
-            existingShape.stereoPanner.pan.setTargetAtTime(panValue, this.audioContext.currentTime, 0.1);
-          }
-        }
-      }, fadeOutTime * 1000);
-    } else {
-      const createNewShape = () => {
-        let type, frequency, color;
-        if (selectedType) {
-          type = selectedType;
-          switch (type) {
-            case 'circle':
-              frequency = this.defaultFrequencies[0];
-              color = this.getShapeColor('circle', activeTheme);
-              break;
-            case 'yellowTriangle':
-              frequency = this.defaultFrequencies[1];
-              color = this.getShapeColor('yellowTriangle', activeTheme);
-              break;
-            case 'triangle':
-              frequency = this.defaultFrequencies[2];
-              color = this.getShapeColor('triangle', activeTheme);
-              break;
-            case 'square':
-              frequency = this.defaultFrequencies[3];
-              color = this.getShapeColor('square', activeTheme);
-              break;
-            case 'purpleSquare':
-              frequency = this.defaultFrequencies[4];
-              color = this.getShapeColor('purpleSquare', activeTheme);
-              break;
-            case 'orangeSquare':
-              frequency = this.defaultFrequencies[5];
-              color = this.getShapeColor('orangeSquare', activeTheme);
-              break;
-          }
-        } else {
-          type = 'circle';
-          frequency = this.defaultFrequencies[0];
-          color = this.getShapeColor('circle', activeTheme);
-        }
-        const graphics = this.add.graphics({ x, y });
-        graphics.setDepth(1);
-        graphics.fillStyle(0x000000, 0.4).fillCircle(4, 4, 22);
-        graphics.fillStyle(color, 0.3).fillCircle(0, 0, 25);
-        graphics.fillStyle(color, 1).fillCircle(0, 0, 20);
-
-        const oscillator = createOscillator(this.audioContext, frequency);
-        if (!oscillator) {
-          console.error('Failed to create oscillator');
-          graphics.destroy();
-          return;
-        }
-        const gain = this.audioContext.createGain();
-        const stereoPanner = this.audioContext.createStereoPanner();
-
-        gain.gain.setValueAtTime(0, this.audioContext.currentTime);
-        oscillator.connect(gain);
-        gain.connect(stereoPanner);
-        stereoPanner.connect(this.audioContext.destination);
-
-        const startTime = this.audioContext.currentTime + 0.01;
-        oscillator.start(startTime);
-        const volumeBoost = frequency <= 110 ? 1.5 : 1;
-        const targetVolume = 0.01 * volumeBoost;
-        gain.gain.setTargetAtTime(targetVolume, startTime, 0.2);
-
-        const initialPan = this.panEnabled ? this.calculatePan(i) : 0;
-        stereoPanner.pan.setValueAtTime(initialPan, this.audioContext.currentTime);
-
-        this.shapes.push({
-          i,
-          j,
-          x,
-          y,
-          type,
-          frequency,
-          graphics,
-          oscillator,
-          gain,
-          stereoPanner,
-          radius: 200,
-          baseVolume: 0,
-          visible: true,
-          isBlending: false
-        });
-        console.log('New shape created at:', { x, y, type, frequency });
-      };
-
-      if (!this.audioContext) {
-        console.log('AudioContext not ready, initializing...');
-        this.audioContext = createAudioContext((context) => {
-          this.audioContext = context;
-          createNewShape();
-        });
-      } else {
-        createNewShape();
       }
+      
+      convolver.buffer = buffer;
+      convolver.connect(this.audioContext.destination);
+      this.reverbNode = convolver;
+      
+      console.log('Improved reverb initialized');
+    } catch (error) {
+      console.warn('Failed to initialize reverb, ignoring:', error);
+      this.reverbNode = null;
+    }
+  }
+
+  // Förbättrad triggerLiveSoundscape
+  triggerLiveSoundscape() {
+    try {
+      if (!this.audioContext || this.audioContext.state !== 'running' || !this.aiWorker || !this.isLive && !this.ambientModeActive) {
+        console.warn('Cannot trigger live soundscape: AudioContext, AI Worker, or Live/ambient mode not ready');
+        return;
+      }
+      
+      // Säkerställ att reverb finns tillgänglig för ambient-läge
+      if ((this.ambientModeActive || this.harmonicEnabled) && !this.reverbNode) {
+        this.initializeReverb();
+      }
+      
+      // Begränsa antal shapes för att minimera dataöverföring
+      const maxShapesToSend = Math.min(this.shapes.length, 8); // Begränsa till max 8 former
+      const shapesData = this.shapes.slice(0, maxShapesToSend).map(shape => ({
+        frequency: shape.frequency,
+        type: shape.type,
+        x: shape.x || 0,
+        y: shape.y || 0,
+        visible: shape.visible !== undefined ? shape.visible : true
+      }));
+      
+      // Ambient-anpassade parametrar
+      const ambientParams = {
+        temperature: 0.2,
+        ambientMode: this.ambientModeActive,
+        noteDuration: 2.0,
+        reverb: 0.4,
+        isMinor: false
+      };
+      
+      console.log('Sending shapes data to AI Worker:', shapesData);
+      this.aiWorker.postMessage({ 
+        type: 'generateControlSequence', 
+        shapes: shapesData, 
+        bpm: this.particleSpeedToBPM(this.particleSpeed),
+        ambientParams: ambientParams
+      });
+      
+    } catch (error) {
+      console.error('Error in triggerLiveSoundscape:', error);
     }
   }
 
@@ -859,6 +622,14 @@ class CosmiChordScene extends Phaser.Scene {
       particle.setVelocity(this.particleSpeed * Math.cos(angle), this.particleSpeed * Math.sin(angle));
       this.particles.push(particle);
     }
+  }
+
+  updateNodeRadius(newRadius) {
+    this.nodeRadius = newRadius;
+    // Uppdatera radius för alla befintliga shapes
+    this.shapes.forEach(shape => {
+      shape.radius = newRadius;
+    });
   }
 
   getShapeColor(type, theme = activeTheme) {
@@ -905,7 +676,8 @@ class CosmiChordScene extends Phaser.Scene {
       masterVolume: this.masterVolume,
       harmonicEnabled: this.harmonicEnabled,
       panEnabled: this.panEnabled,
-      defaultFrequencies: this.defaultFrequencies
+      defaultFrequencies: this.defaultFrequencies,
+      nodeRadius: this.nodeRadius
     };
   }
 
@@ -975,7 +747,7 @@ class CosmiChordScene extends Phaser.Scene {
         oscillator,
         gain,
         stereoPanner,
-        radius: 200,
+        radius: this.nodeRadius || 200,
         baseVolume: 0,
         visible: shapeData.visible,
         isBlending: false
@@ -988,6 +760,11 @@ class CosmiChordScene extends Phaser.Scene {
     this.harmonicEnabled = config.harmonicEnabled || false;
     this.panEnabled = config.panEnabled || false;
     this.defaultFrequencies = config.defaultFrequencies || [55, 220, 330, 440, 110, 55];
+    
+    // Uppdatera nodeRadius ifall det finns i config
+    if (config.nodeRadius) {
+      this.updateNodeRadius(config.nodeRadius);
+    }
 
     updateUI(this, this.particleCount, this.particleSpeedToBPM(this.particleSpeed), this.masterVolume, this.harmonicEnabled, this.panEnabled);
     this.updateParticleCount(this.particleCount);
@@ -1006,7 +783,7 @@ class CosmiChordScene extends Phaser.Scene {
     const maxBPM = 180;
     const minSpeed = 0.1;
     const maxSpeed = 5;
-    return Math.round(minBPM + (maxBPM - minBPM) * (particleSpeed - minSpeed) / (maxSpeed - minBPM));
+    return Math.round(minBPM + (maxBPM - minBPM) * (particleSpeed - minSpeed) / (maxSpeed - minSpeed));
   }
 
   chordColors = {
@@ -1018,34 +795,9 @@ class CosmiChordScene extends Phaser.Scene {
     5: { color: 'purple', label: 'Dark', frequencies: [55, 220, 261.63, 311.13, 369.99, 466.16], key: '6' }
   };
 
-  triggerLiveSoundscape() {
-    if (!this.audioContext || this.audioContext.state !== 'running' || !this.aiWorker || !this.isLive) {
-      console.warn('Cannot trigger live soundscape: AudioContext, AI Worker, or Live mode not ready', {
-        audioContext: !!this.audioContext,
-        audioContextState: this.audioContext ? this.audioContext.state : 'null',
-        aiWorker: !!this.aiWorker,
-        isLive: this.isLive
-      });
-      return;
-    }
-    const shapesData = this.shapes.map(shape => ({
-      frequency: shape.frequency,
-      type: shape.type,
-      x: shape.x || (shape.body ? shape.body.position.x : shape.x),
-      y: shape.y || (shape.body ? shape.body.position.y : shape.y),
-      visible: shape.visible !== undefined ? shape.visible : true
-    }));
-    console.log('Sending shapes data to AI Worker:', shapesData);
-    this.aiWorker.postMessage({ 
-      type: 'generateControlSequence', 
-      shapes: shapesData, 
-      bpm: this.particleSpeedToBPM(this.particleSpeed) 
-    });
-  }
-
   handleControlSequence(sequence) {
-    if (!this.audioContext || this.audioContext.state !== 'running' || !this.isLive) {
-      console.warn('Cannot handle control sequence: AudioContext or Live mode not ready');
+    if (!this.audioContext || this.audioContext.state !== 'running' || (!this.isLive && !this.ambientModeActive)) {
+      console.warn('Cannot handle control sequence: AudioContext or Live/Ambient mode not ready');
       return;
     }
 
@@ -1105,7 +857,8 @@ class CosmiChordScene extends Phaser.Scene {
         // Ton (frekvens)
         if (event.frequency !== undefined) {
           shape.frequency = event.frequency;
-          shape.oscillator.frequency.cancelScheduledValues(this.audioContext.currentTime).setTargetAtTime(event.frequency, this.audioContext.currentTime, 0.1);
+          shape.oscillator.frequency.cancelScheduledValues(this.audioContext.currentTime);
+          shape.oscillator.frequency.setTargetAtTime(event.frequency, this.audioContext.currentTime, 0.1);
           const newType = this.getClosestShapeType(event.frequency);
           if (newType !== shape.type && shape.visible) {
             shape.type = newType;
@@ -1190,6 +943,500 @@ class CosmiChordScene extends Phaser.Scene {
       'Dark': '#ff0000'
     };
     return textColors[label] || '#0000ff';
+  }
+
+  // Förbered AI-arbetare för ljudgenerering
+  initializeAIWorker() {
+    if (window.Worker) {
+      this.aiWorker = new Worker('utils/aiUtils.worker.js');
+      console.log('AI Worker created for soundscape generation');
+      
+      this.aiWorker.onmessage = (e) => {
+        if (e.data.type === 'initialized') {
+          console.log('AI Worker initialized');
+        } else if (e.data.type === 'controlSequence') {
+          console.log('Received control sequence from AI Worker:', e.data.sequence);
+          this.handleControlSequence(e.data.sequence);
+        } else if (e.data.type === 'error') {
+          console.error('AI Worker error:', e.data.message);
+        }
+      };
+      
+      // Initialisera Magenta.js modeller i worker
+      this.aiWorker.postMessage({ type: 'initialize' });
+    } else {
+      console.warn('Web Workers not supported in this browser. AI generation will not be available.');
+    }
+  }
+
+  resetShapeToOriginalColor(shape) {
+    const originalColor = this.getShapeColor(shape.type, activeTheme);
+    shape.graphics.clear();
+    shape.graphics.fillStyle(0x000000, 0.4).fillCircle(4, 4, 22);
+    shape.graphics.fillStyle(originalColor, 0.3).fillCircle(0, 0, 25);
+    shape.graphics.fillStyle(originalColor, 1).fillCircle(0, 0, 20);
+  }
+
+  setupInputListeners() {
+    this.input.on('pointerdown', (pointer) => {
+      if (!this.audioContext) {
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)(); // Initiera vid klick
+        console.log('AudioContext initialized');
+        
+        // Initiera reverb när audiocontext skapas
+        this.initializeReverb();
+        
+        if (this.isLive && this.aiWorker) {
+          this.triggerLiveSoundscape(); // Trigga LIVE direkt efter klick om aktiverat
+        }
+      } else if (this.audioContext.state === 'suspended') {
+        this.audioContext.resume().then(() => {
+          console.log('AudioContext resumed');
+          this.shapes.forEach(shape => {
+            if (shape.oscillator && shape.gain && shape.oscillator.state === 'suspended') {
+              shape.oscillator.start();
+            }
+          });
+          if (this.isLive && this.aiWorker) {
+            this.triggerLiveSoundscape(); // Trigga LIVE vid återupptag
+          }
+        });
+      }
+    });
+
+    this.draggedShape = null;
+    this.isDragging = false;
+    this.selectedNoteType = null;
+
+    this.input.keyboard.on('keydown-SHIFT', () => {
+      document.getElementById('renderDiv').style.cursor = 'grab';
+    });
+
+    // Lägg till tangentbordskontroller för att välja nodtyper
+    ['ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX'].forEach((key, index) => {
+      this.input.keyboard.on(`keydown-${key}`, () => {
+        let customCursor = document.getElementById('customCursor');
+        if (customCursor) customCursor.remove();
+
+        customCursor = document.createElement('div');
+        customCursor.id = 'customCursor';
+        customCursor.style.position = 'fixed';
+        customCursor.style.pointerEvents = 'none';
+        customCursor.style.zIndex = '9999';
+        customCursor.style.userSelect = 'none';
+        customCursor.style.width = '40px';
+        customCursor.style.height = '40px';
+        customCursor.style.borderRadius = '50%';
+        customCursor.style.transform = 'translate(-50%, -50%)';
+
+        const colors = {
+          0: { color: this.getShapeColor('circle', activeTheme), type: 'circle' },
+          1: { color: this.getShapeColor('yellowTriangle', activeTheme), type: 'yellowTriangle' },
+          2: { color: this.getShapeColor('triangle', activeTheme), type: 'triangle' },
+          3: { color: this.getShapeColor('square', activeTheme), type: 'square' },
+          4: { color: this.getShapeColor('purpleSquare', activeTheme), type: 'purpleSquare' },
+          5: { color: this.getShapeColor('orangeSquare', activeTheme), type: 'orangeSquare' }
+        };
+
+        const type = colors[index].type;
+        this.selectedNoteType = type;
+        const rgbColor = {
+          r: (colors[index].color >> 16) & 0xFF,
+          g: (colors[index].color >> 8) & 0xFF,
+          b: colors[index].color & 0xFF
+        };
+        customCursor.style.backgroundColor = `rgba(${rgbColor.r}, ${rgbColor.g}, ${rgbColor.b}, 0.25)`;
+        customCursor.style.border = `2px solid rgb(${rgbColor.r}, ${rgbColor.g}, ${rgbColor.b})`;
+        customCursor.style.boxShadow = `0 0 10px rgba(${rgbColor.r}, ${rgbColor.g}, ${rgbColor.b}, 0.5)`;
+        document.body.appendChild(customCursor);
+        customCursor.style.display = 'block';
+        document.getElementById('renderDiv').style.cursor = 'none';
+        const updatePosition = (e) => {
+          requestAnimationFrame(() => {
+            customCursor.style.left = `${e.clientX}px`;
+            customCursor.style.top = `${e.clientY}px`;
+          });
+        };
+        document.addEventListener('mousemove', updatePosition);
+        this.updateCursorPosition = updatePosition;
+        const currentEvent = this.input.activePointer.event;
+        if (currentEvent) updatePosition(currentEvent);
+      });
+      
+      this.input.keyboard.on(`keyup-${key}`, () => {
+        const customCursor = document.getElementById('customCursor');
+        if (customCursor) customCursor.remove();
+        document.getElementById('renderDiv').style.cursor = 'default';
+        document.removeEventListener('mousemove', this.updateCursorPosition);
+        this.updateCursorPosition = null;
+        this.selectedNoteType = null;
+      });
+    });
+
+    this.input.keyboard.on('keyup-SHIFT', () => {
+      document.getElementById('renderDiv').style.cursor = 'default';
+      if (this.isDragging) {
+        this.isDragging = false;
+        this.draggedShape = null;
+      }
+    });
+
+    // Lägg till klickhändelse för att placera nya former
+    this.input.on('pointerdown', (pointer) => {
+      if (this.input.keyboard.checkDown(this.input.keyboard.addKey('X'))) {
+        const clickedShape = this.shapes.find(shape =>
+          Phaser.Math.Distance.Between(pointer.x, pointer.y, shape.x, shape.y) < 25
+        );
+        if (clickedShape) {
+          clickedShape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
+          clickedShape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.01);
+          setTimeout(() => {
+            clickedShape.graphics.destroy();
+            clickedShape.oscillator.stop();
+            clickedShape.oscillator.disconnect();
+            clickedShape.gain.disconnect();
+            if (clickedShape.stereoPanner) clickedShape.stereoPanner.disconnect();
+            this.shapes = this.shapes.filter(shape => shape !== clickedShape);
+          }, 50);
+          return;
+        }
+      } else if (this.input.keyboard.checkDown(this.input.keyboard.addKey('SHIFT'))) {
+        const clickedShape = this.shapes.find(shape =>
+          Phaser.Math.Distance.Between(pointer.x, pointer.y, shape.x, shape.y) < 25
+        );
+        if (clickedShape) {
+          this.draggedShape = clickedShape;
+          this.isDragging = true;
+          document.getElementById('renderDiv').style.cursor = 'grabbing';
+        }
+      } else {
+        this.placeShape(pointer, this.selectedNoteType);
+      }
+    });
+
+    this.input.keyboard.on('keydown-CTRL', () => {
+      document.getElementById('renderDiv').style.cursor = '➖';
+    });
+    this.input.keyboard.on('keydown-X', () => {
+      let customCursor = document.getElementById('customCursor');
+      if (customCursor) customCursor.remove();
+      customCursor = document.createElement('div');
+      document.getElementById('renderDiv').style.cursor = 'none';
+      customCursor.id = 'customCursor';
+      customCursor.style.position = 'fixed';
+      customCursor.style.fontSize = '16px';
+      customCursor.style.pointerEvents = 'none';
+      customCursor.style.zIndex = '9999';
+      customCursor.style.color = '#ffffff';
+      customCursor.style.userSelect = 'none';
+      customCursor.textContent = '⌫';
+      document.body.appendChild(customCursor);
+      customCursor.style.display = 'block';
+      const updatePosition = (e) => {
+        requestAnimationFrame(() => {
+          customCursor.style.left = `${e.clientX}px`;
+          customCursor.style.top = `${e.clientY}px`;
+        });
+      };
+      const currentEvent = this.input.activePointer.event;
+      if (currentEvent) updatePosition(currentEvent);
+      document.addEventListener('mousemove', updatePosition);
+      this.updateCursorPosition = updatePosition;
+    });
+    this.input.keyboard.on('keyup-X', () => {
+      document.getElementById('renderDiv').style.cursor = 'default';
+      const customCursor = document.getElementById('customCursor');
+      if (customCursor) customCursor.remove();
+      document.removeEventListener('mousemove', this.updateCursorPosition);
+      this.updateCursorPosition = null;
+    });
+    this.input.keyboard.on('keyup-CTRL', () => {
+      if (!this.input.keyboard.checkDown(this.input.keyboard.addKey('X'))) {
+        document.getElementById('renderDiv').style.cursor = 'default';
+      }
+    });
+    this.input.keyboard.on('keydown-Q', () => {
+      const chordIndex = 0;
+      document.getElementById('chordSlider').value = chordIndex;
+      const event = new Event('input');
+      document.getElementById('chordSlider').dispatchEvent(event);
+    });
+    this.input.keyboard.on('keydown-W', () => {
+      const chordIndex = 1;
+      document.getElementById('chordSlider').value = chordIndex;
+      const event = new Event('input');
+      document.getElementById('chordSlider').dispatchEvent(event);
+    });
+    this.input.keyboard.on('keydown-E', () => {
+      const chordIndex = 2;
+      document.getElementById('chordSlider').value = chordIndex;
+      const event = new Event('input');
+      document.getElementById('chordSlider').dispatchEvent(event);
+    });
+    this.input.keyboard.on('keydown-R', () => {
+      const chordIndex = 3;
+      document.getElementById('chordSlider').value = chordIndex;
+      const event = new Event('input');
+      document.getElementById('chordSlider').dispatchEvent(event);
+    });
+    this.input.keyboard.on('keydown-T', () => {
+      const chordIndex = 4;
+      document.getElementById('chordSlider').value = chordIndex;
+      const event = new Event('input');
+      document.getElementById('chordSlider').dispatchEvent(event);
+    });
+    this.input.keyboard.on('keydown-Y', () => {
+      const chordIndex = 5;
+      document.getElementById('chordSlider').value = chordIndex;
+      const event = new Event('input');
+      document.getElementById('chordSlider').dispatchEvent(event);
+    });
+    this.input.keyboard.on('keydown-B', () => {
+      const blendButton = document.getElementById('blendToggle');
+      this.harmonicEnabled = !this.harmonicEnabled;
+      blendButton.textContent = this.harmonicEnabled ? 'On' : 'Off';
+      blendButton.style.background = this.harmonicEnabled ? '#00cc00' : '#333';
+      blendButton.style.width = '60px';
+    });
+    this.input.keyboard.on('keydown-P', () => {
+      const panButton = document.getElementById('panToggle');
+      this.panEnabled = !this.panEnabled;
+      panButton.textContent = this.panEnabled ? 'On' : 'Off';
+      panButton.style.background = this.panEnabled ? '#2ecc71' : '#333';
+      panButton.style.width = '60px';
+      this.shapes.forEach(shape => {
+        if (shape.stereoPanner) {
+          const targetPan = this.panEnabled ? this.calculatePan(shape.i) : 0;
+          shape.stereoPanner.pan.cancelScheduledValues(this.audioContext.currentTime);
+          shape.stereoPanner.pan.setTargetAtTime(targetPan, this.audioContext.currentTime, 0.2);
+        }
+      });
+    });
+
+    this.input.on('pointermove', (pointer) => {
+      if (this.isDragging && this.draggedShape && this.input.keyboard.checkDown(this.input.keyboard.addKey('SHIFT'))) {
+        const i = Math.floor(pointer.x / this.gridSize);
+        const j = Math.floor(pointer.y / this.gridSize);
+        const clampedI = Math.max(0, Math.min(i, this.gridCols - 1));
+        const clampedJ = Math.max(0, Math.min(j, this.gridRows - 1));
+        const newX = clampedI * this.gridSize + this.gridSize / 2;
+        const newY = clampedJ * this.gridSize + this.gridSize / 2;
+
+        this.draggedShape.x = newX;
+        this.draggedShape.y = newY;
+        this.draggedShape.graphics.setPosition(newX, newY);
+        this.draggedShape.i = clampedI;
+        this.draggedShape.j = clampedJ;
+
+        if (this.draggedShape.gain) {
+          this.draggedShape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
+          this.draggedShape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.01);
+          this.draggedShape.gain.gain.setTargetAtTime(
+            this.draggedShape.baseVolume * this.masterVolume * (this.draggedShape.frequency <= 110 ? 1.5 : 1),
+            this.audioContext.currentTime + 0.01,
+            0.05
+          );
+
+          if (this.panEnabled && this.draggedShape.stereoPanner) {
+            const panValue = this.calculatePan(clampedI);
+            this.draggedShape.stereoPanner.pan.cancelScheduledValues(this.audioContext.currentTime);
+            this.draggedShape.stereoPanner.pan.setTargetAtTime(panValue, this.audioContext.currentTime, 0.1);
+          }
+        }
+      }
+    });
+
+    this.input.on('pointerup', () => {
+      if (this.input.keyboard.checkDown(this.input.keyboard.addKey('SHIFT'))) {
+        document.getElementById('renderDiv').style.cursor = 'grab';
+      }
+      this.isDragging = false;
+      this.draggedShape = null;
+    });
+  }
+
+  placeShape(pointer, type) {
+    try {
+      if (!this.audioContext) {
+        this.audioContext = createAudioContext();
+        console.log('AudioContext initialized on shape placement');
+        this.initializeReverb();
+      }
+  
+      if (this.audioContext.state === 'suspended') {
+        this.audioContext.resume();
+      }
+  
+      // Enkel gränskollidkontroll
+      if (
+        pointer.x < this.playAreaLeft ||
+        pointer.x > this.playAreaRight ||
+        pointer.y < this.playAreaTop ||
+        pointer.y > this.playAreaBottom
+      ) {
+        return;
+      }
+  
+      const i = Math.floor(pointer.x / this.gridSize);
+      const j = Math.floor(pointer.y / this.gridSize);
+      
+      // Kolla om det redan finns en form på platsen - minimala beräkningar
+      const existingShape = this.shapes.find(shape => shape.i === i && shape.j === j);
+      if (existingShape) {
+        // Ändra typ på befintlig nod eller ta bort den
+        this.updateExistingShape(existingShape, i, j);
+        return;
+      }
+  
+      // Skapa ny shape - mycket enklare än tidigare
+      let shape = {};
+      shape.i = i;
+      shape.j = j;
+      shape.x = i * this.gridSize + this.gridSize / 2;
+      shape.y = j * this.gridSize + this.gridSize / 2;
+      shape.radius = this.nodeRadius || 100;
+      shape.type = type || 'circle';
+      shape.visible = true;
+      shape.baseVolume = 0;
+  
+      // Frekvens- och ljudinställningar
+      const frequencies = [...this.chordColors[this.selectedChord]?.frequencies || this.defaultFrequencies];
+      let frequency = this.getFrequencyForType(shape.type, frequencies);
+      
+      // Enkelt ljud setup
+      shape.oscillator = createOscillator(this.audioContext, frequency, this.getOscTypeForShape(shape.type));
+      if (!shape.oscillator) {
+        console.error('Failed to create oscillator');
+        return;
+      }
+  
+      this.setupShapeAudio(shape, frequency);
+  
+      // Enkel grafik
+      shape.graphics = this.add.graphics();
+      this.updateShapeGraphics(shape);
+  
+      // Lägg till i shapes
+      this.shapes.push(shape);
+  
+      return shape;
+    } catch (err) {
+      console.error("Error in placeShape:", err);
+      return null;
+    }
+  }
+
+  // Hjälpmetod för att hantera befintliga shapes
+  updateExistingShape(existingShape, i, j) {
+    try {
+      // Mycket förenklad hantering av shape-uppdateringar
+      let newType, newFrequency;
+      const frequencies = [...this.chordColors[this.selectedChord]?.frequencies || this.defaultFrequencies];
+      
+      // Förenkla sekventiell ändring av typ
+      switch (existingShape.type) {
+        case 'circle': newType = 'yellowTriangle'; break;
+        case 'yellowTriangle': newType = 'triangle'; break;
+        case 'triangle': newType = 'square'; break;
+        case 'square': newType = 'purpleSquare'; break;
+        case 'purpleSquare': newType = 'orangeSquare'; break;
+        case 'orangeSquare': 
+          // Ta bort om redan orangeSquare
+          this.removeShape(existingShape);
+          return;
+      }
+      
+      // Uppdatera type och frequency
+      existingShape.type = newType;
+      existingShape.frequency = this.getFrequencyForType(newType, frequencies);
+      
+      // Uppdatera ljud
+      this.updateShapeAudio(existingShape);
+      
+      // Uppdatera grafik
+      this.updateShapeGraphics(existingShape);
+    } catch (err) {
+      console.error("Error in updateExistingShape:", err);
+    }
+  }
+  
+  // Hjälpmetod för att ta bort shapes säkert
+  removeShape(shape) {
+    try {
+      // Säkert ta bort
+      if (shape.gain) {
+        shape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
+        shape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.01);
+      }
+      
+      // Förenklad cleanup efter kort fördröjning
+      setTimeout(() => {
+        if (shape.graphics) shape.graphics.destroy();
+        if (shape.oscillator) {
+          shape.oscillator.stop();
+          shape.oscillator.disconnect();
+        }
+        if (shape.gain) shape.gain.disconnect();
+        if (shape.stereoPanner) shape.stereoPanner.disconnect();
+        if (shape.subOscillator) {
+          shape.subOscillator.stop();
+          shape.subOscillator.disconnect();
+        }
+        
+        // Ta bort från shapes array
+        this.shapes = this.shapes.filter(s => s !== shape);
+      }, 50);
+    } catch (err) {
+      console.error("Error in removeShape:", err);
+    }
+  }
+  
+  // Hjälpmetod för att få standardfrekvens för en formtyp
+  getFrequencyForType(type, frequencies) {
+    switch (type) {
+      case 'circle': return frequencies[0] || 440;
+      case 'yellowTriangle': return frequencies[1] || 220;
+      case 'triangle': return frequencies[2] || 330;
+      case 'square': return frequencies[3] || 440;
+      case 'purpleSquare': return frequencies[4] || 110;
+      case 'orangeSquare': return frequencies[5] || 55;
+      default: return 440;
+    }
+  }
+  
+  // Hjälpmetod för att få oscillatortyp baserat på form
+  getOscTypeForShape(type) {
+    if (type === 'circle') return 'sine';
+    if (type === 'triangle' || type === 'yellowTriangle') return 'triangle';
+    if (type === 'purpleSquare') return 'sawtooth';
+    return 'square';
+  }
+  
+  // Uppdatera ljud för en befintlig shape
+  updateShapeAudio(shape) {
+    try {
+      if (!shape.oscillator) return;
+      
+      // Skapa en ny oscillator med den nya frekvensen och typen
+      const oldOscillator = shape.oscillator;
+      shape.oscillator = createOscillator(this.audioContext, shape.frequency, this.getOscTypeForShape(shape.type));
+      
+      // Anslut den nya oscillatorn
+      if (shape.filter) {
+        shape.oscillator.connect(shape.filter);
+      } else {
+        shape.oscillator.connect(shape.gain);
+      }
+      
+      // Starta ny och stoppa gammal
+      shape.oscillator.start();
+      setTimeout(() => {
+        oldOscillator.stop();
+        oldOscillator.disconnect();
+      }, 50);
+    } catch (err) {
+      console.error("Error in updateShapeAudio:", err);
+    }
   }
 }
 

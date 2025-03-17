@@ -78,6 +78,7 @@ export function createUI(scene) {
   randomContainer.innerHTML = `
     <button id="randomButton">RANDOM</button>
     <button id="liveButton">LIVE</button>
+    <button id="aiAmbientButton">AI AMBIENT</button>
   `;
   sliderContainer.appendChild(randomContainer);
 
@@ -89,17 +90,10 @@ export function createUI(scene) {
   `;
   sliderContainer.appendChild(resetContainer);
 
-  const saveContainer = document.createElement('div');
-  saveContainer.className = 'button-container';
-  saveContainer.innerHTML = `
-    <button id="saveConfig">Save & Share</button>
-  `;
-  sliderContainer.appendChild(saveContainer);
-
   const toggleButton = document.createElement('button');
   toggleButton.id = 'toggleMenu';
   toggleButton.className = 'toggle-menu';
-  toggleButton.innerHTML = '<span>←</span>';
+  toggleButton.innerHTML = 'HIDE MENU';
   document.getElementById('renderDiv').appendChild(toggleButton);
 }
 
@@ -119,12 +113,17 @@ export function updateUI(scene, particleCount, particleSpeed, masterVolume, harm
   document.getElementById('armLengthSlider').value = scene.nodeRadius || 100;
 
   const blendButton = document.getElementById('blendToggle');
-  blendButton.textContent = harmonicEnabled ? 'On' : 'Off';
+  blendButton.textContent = harmonicEnabled ? 'Ambient' : 'Off';
   blendButton.style.background = harmonicEnabled ? '#00cc00' : '#333';
 
   const panButton = document.getElementById('panToggle');
   panButton.textContent = panEnabled ? 'On' : 'Off';
   panButton.style.background = panEnabled ? '#2ecc71' : '#333';
+
+  const aiAmbientButton = document.getElementById('aiAmbientButton');
+  if (aiAmbientButton) {
+    aiAmbientButton.style.background = scene.ambientModeActive ? '#9932CC' : '#333';
+  }
 }
 
 export function handleUIEvents(scene) {
@@ -163,9 +162,32 @@ export function handleUIEvents(scene) {
 
   document.getElementById('blendToggle').addEventListener('click', (e) => {
     scene.harmonicEnabled = !scene.harmonicEnabled;
-    e.target.textContent = scene.harmonicEnabled ? 'On' : 'Off';
+    e.target.textContent = scene.harmonicEnabled ? 'Ambient' : 'Off';
     e.target.style.background = scene.harmonicEnabled ? '#00cc00' : '#333';
-    e.target.style.width = '60px';
+    e.target.style.width = '70px';
+    
+    scene.shapes.forEach(shape => {
+      if (shape.oscillator && scene.audioContext && scene.audioContext.state === 'running') {
+        if (!scene.harmonicEnabled) {
+          shape.oscillator.frequency.cancelScheduledValues(scene.audioContext.currentTime);
+          shape.oscillator.frequency.setTargetAtTime(
+            shape.frequency,
+            scene.audioContext.currentTime,
+            1.0
+          );
+        }
+        
+        if (shape.oscillator.filter) {
+          const filterFreq = scene.harmonicEnabled ? 1800 : 2200;
+          shape.oscillator.filter.frequency.cancelScheduledValues(scene.audioContext.currentTime);
+          shape.oscillator.filter.frequency.setTargetAtTime(
+            filterFreq,
+            scene.audioContext.currentTime,
+            0.5
+          );
+        }
+      }
+    });
   });
 
   document.getElementById('panToggle').addEventListener('click', (e) => {
@@ -185,7 +207,12 @@ export function handleUIEvents(scene) {
 
   document.getElementById('armLengthSlider').addEventListener('input', (e) => {
     const newRadius = parseInt(e.target.value);
-    scene.nodeRadius = newRadius;
+    if (scene.updateNodeRadius) {
+      scene.updateNodeRadius(newRadius);
+    } else {
+      // Fallback för äldre versioner
+      scene.nodeRadius = newRadius;
+    }
     document.getElementById('armLengthValue').textContent = newRadius;
     updateUI(scene, scene.particleCount, scene.particleSpeed, scene.masterVolume, scene.harmonicEnabled, scene.panEnabled);
   });
@@ -313,56 +340,188 @@ export function handleUIEvents(scene) {
     }
   });
 
-  function setupLiveMode(scene) {
-    const baseDelay = 5000;
-    const speedFactor = Math.pow(1.5 / scene.particleSpeed, 1.5);
-    const delay = Math.max(1000, baseDelay * speedFactor);
-  
-    scene.liveTimer = scene.time.addEvent({
-      delay: delay,
-      callback: () => {
-        console.log('Triggering live soundscape in setupLiveMode');
-        if (scene.shapes.length === 0) {
-          createRandomShapes(scene, Math.floor(Math.random() * 5) + 3); // Skapa noder om inga finns
-        }
-        scene.triggerLiveSoundscape();
-      },
-      loop: true
-    });
-  }
-
-  function createRandomShapes(scene, count) {
-    const shapeTypes = ['circle', 'yellowTriangle', 'triangle', 'square', 'purpleSquare', 'orangeSquare'];
-    const placedPositions = new Set();
-  
-    for (let n = 0; n < count; n++) {
-      let attempts = 0;
-      let i, j;
-      do {
-        i = Math.floor(Math.random() * scene.gridCols);
-        j = Math.floor(Math.random() * scene.gridRows);
-        attempts++;
-        if (attempts > 30) break;
-      } while (
-        placedPositions.has(`${i},${j}`) ||
-        i * scene.gridSize + scene.gridSize / 2 < scene.playAreaLeft ||
-        i * scene.gridSize + scene.gridSize / 2 > scene.playAreaRight ||
-        j * scene.gridSize + scene.gridSize / 2 < scene.playAreaTop ||
-        j * scene.gridSize + scene.gridSize / 2 > scene.playAreaBottom
-      );
-    
-      if (attempts > 30) continue;
-    
-      placedPositions.add(`${i},${j}`);
-      const randomType = shapeTypes[Math.floor(Math.random() * shapeTypes.length)];
-      const mockPointer = { x: i * scene.gridSize + scene.gridSize / 2, y: j * scene.gridSize + scene.gridSize / 2 };
-      scene.placeShape(mockPointer, randomType);
+  document.getElementById('aiAmbientButton').addEventListener('click', () => {
+    if (!scene.audioContext) {
+      scene.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      console.log('AudioContext initialized via AI Ambient button');
+      
+      // Initiera reverb direkt
+      if (typeof scene.initializeReverb === 'function') {
+        scene.initializeReverb();
+      }
     }
-  
-    scene.harmonicEnabled = false;
-    scene.panEnabled = true;
-    updateUI(scene, scene.particleCount, scene.particleSpeed, scene.masterVolume, scene.harmonicEnabled, scene.panEnabled);
-  }
+    
+    if (scene.audioContext.state === 'suspended') {
+      scene.audioContext.resume();
+    }
+    
+    // Om reverb fortfarande inte är initierad, försök igen
+    if (!scene.reverbNode && typeof scene.initializeReverb === 'function') {
+      scene.initializeReverb();
+    }
+    
+    scene.ambientModeActive = !scene.ambientModeActive;
+    const aiAmbientButton = document.getElementById('aiAmbientButton');
+    aiAmbientButton.style.background = scene.ambientModeActive ? '#9932CC' : '#333';
+    
+    if (scene.ambientModeActive) {
+      // Välj en ambient-färgschema
+      scene.harmonicEnabled = true;
+      document.getElementById('blendToggle').textContent = 'Ambient';
+      document.getElementById('blendToggle').style.background = '#00cc00';
+      
+      // Skapa former om det inte finns några
+      if (scene.shapes.length === 0) {
+        const config = {
+          particleCount: 30,
+          particleSpeed: 0.8,
+          masterVolume: 0.4,
+          shapes: Array(4).fill().map(() => ({
+            i: Math.floor(Math.random() * scene.gridCols),
+            j: Math.floor(Math.random() * scene.gridRows),
+            type: Math.floor(Math.random() * 4)
+          })),
+          ambientMode: true
+        };
+        scene.loadConfiguration(config);
+      } else {
+        // Tillämpa reverbeffekten på alla befintliga former
+        scene.shapes.forEach(shape => {
+          // Om formen redan har en reverbeffekt, hoppa över den
+          if (shape.dryGain || !scene.reverbNode) return;
+          
+          // Skapa dry/wet-mix för reverbeffekten
+          const dryGain = scene.audioContext.createGain();
+          const wetGain = scene.audioContext.createGain();
+          
+          // Anpassa mixen för ambient-läge
+          const wetLevel = 0.7;
+          const dryLevel = 0.3;
+          
+          dryGain.gain.value = dryLevel;
+          wetGain.gain.value = wetLevel;
+          
+          // Koppla bort den nuvarande anslutningen
+          if (shape.gain) {
+            shape.gain.disconnect();
+            
+            // Anslut den nya signalvägen med reverb
+            shape.gain.connect(dryGain);
+            shape.gain.connect(scene.reverbNode);
+            scene.reverbNode.connect(wetGain);
+            
+            dryGain.connect(shape.stereoPanner);
+            wetGain.connect(shape.stereoPanner);
+            
+            shape.dryGain = dryGain;
+            shape.wetGain = wetGain;
+            
+            // Justera filtret för mjukare ljud i ambient-läge
+            if (shape.filter) {
+              shape.filter.frequency.cancelScheduledValues(scene.audioContext.currentTime);
+              shape.filter.frequency.setTargetAtTime(2000, scene.audioContext.currentTime, 0.5);
+            }
+          }
+        });
+        
+        // Uppdatera även oscillatortypen för ett mjukare ljud
+        scene.shapes.forEach(shape => {
+          if (shape.oscillator) {
+            // Skapa en ny oscillator med sinus-våg för mjukare ambient-ljud
+            const oldOscillator = shape.oscillator;
+            
+            // Skapa en ny oscillator med samma frekvens men olika vågform
+            let newOscType = 'sine';
+            if (shape.type === 'triangle' || shape.type === 'yellowTriangle') {
+              newOscType = 'triangle';
+            }
+            
+            shape.oscillator = scene.audioContext.createOscillator();
+            shape.oscillator.type = newOscType;
+            shape.oscillator.frequency.value = oldOscillator.frequency.value;
+            
+            // Koppla den nya oscillatorn
+            if (shape.filter) {
+              shape.oscillator.connect(shape.filter);
+            } else {
+              shape.oscillator.connect(shape.gain);
+            }
+            
+            // Starta den nya oscillatorn och stoppa den gamla
+            shape.oscillator.start();
+            setTimeout(() => {
+              oldOscillator.stop();
+              oldOscillator.disconnect();
+            }, 50);
+            
+            // Lägg till suboscillator för mer fyllig bas
+            if (!shape.subOscillator) {
+              const subOscillator = scene.audioContext.createOscillator();
+              subOscillator.type = 'sine';
+              subOscillator.frequency.value = shape.frequency / 2; // En oktav ner
+              
+              const subGain = scene.audioContext.createGain();
+              subGain.gain.value = 0.3; // 30% sub-nivå
+              
+              subOscillator.connect(subGain);
+              subGain.connect(shape.gain);
+              
+              subOscillator.start();
+              shape.subOscillator = subOscillator;
+              shape.subGain = subGain;
+            }
+          }
+        });
+      }
+      
+      // Trigga ambient-ljudgenerering med en kort fördröjning för att säkerställa att allt är redo
+      setTimeout(() => {
+        scene.triggerLiveSoundscape();
+      }, 200);
+    } else {
+      // När ambient-läget stängs av, återställ reverb och oscillatortyp
+      scene.shapes.forEach(shape => {
+        if (shape.dryGain && shape.wetGain) {
+          // Koppla bort reverb-effekten
+          if (shape.gain) {
+            shape.gain.disconnect();
+          }
+          if (shape.dryGain) {
+            shape.dryGain.disconnect();
+          }
+          if (shape.wetGain) {
+            shape.wetGain.disconnect();
+          }
+          
+          // Återanslut direkt till stereoPanner
+          if (shape.gain && shape.stereoPanner) {
+            shape.gain.connect(shape.stereoPanner);
+          }
+          
+          // Ta bort referenserna
+          shape.dryGain = null;
+          shape.wetGain = null;
+          
+          // Återställ filter till standard
+          if (shape.filter) {
+            shape.filter.frequency.cancelScheduledValues(scene.audioContext.currentTime);
+            shape.filter.frequency.setTargetAtTime(5000, scene.audioContext.currentTime, 0.5);
+          }
+        }
+        
+        // Stoppa suboscillatorn om den finns
+        if (shape.subOscillator) {
+          shape.subOscillator.stop();
+          shape.subOscillator.disconnect();
+          if (shape.subGain) {
+            shape.subGain.disconnect();
+          }
+          shape.subOscillator = null;
+          shape.subGain = null;
+        }
+      });
+    }
+  });
 
   document.getElementById('pauseButton').addEventListener('click', () => {
     scene.isPaused = !scene.isPaused;
@@ -401,27 +560,6 @@ export function handleUIEvents(scene) {
     }
   });
 
-  document.getElementById('saveConfig').addEventListener('click', () => {
-    const config = scene.saveConfiguration();
-    const encodedConfig = btoa(JSON.stringify(config));
-    const shareLink = `${window.location.origin}${window.location.pathname}?config=${encodedConfig}`;
-    alert(`Copy this link to share your configuration:\n${shareLink}`);
-    navigator.clipboard.writeText(shareLink).then(() => {
-      console.log('Link copied to clipboard');
-    }).catch(err => console.error('Failed to copy link:', err));
-  });
-
-  const urlParams = new URLSearchParams(window.location.search);
-  const configParam = urlParams.get('config');
-  if (configParam) {
-    try {
-      const decodedConfig = JSON.parse(atob(configParam));
-      scene.loadConfiguration(decodedConfig);
-    } catch (error) {
-      console.error('Invalid configuration in URL:', error);
-    }
-  }
-
   document.getElementById('toggleMenu').addEventListener('click', () => toggleMenu());
 }
 
@@ -435,22 +573,32 @@ export function toggleMenu() {
     sliderContainer.style.transform = 'translateX(-200px)';
     logoImg.style.transform = 'translateX(-200px)';
     toggleButton.style.transform = 'translateX(-20px)';
-    toggleButton.innerHTML = '<span>→</span>';
+    toggleButton.innerHTML = 'SHOW MENU';
   } else {
     sliderContainer.style.transform = '';
     logoImg.style.transform = '';
     toggleButton.style.transform = '';
-    toggleButton.innerHTML = '<span>←</span>';
+    toggleButton.innerHTML = 'HIDE MENU';
   }
 }
 
 export function resetScene(scene) {
   scene.shapes.forEach(shape => {
     shape.graphics.destroy();
-    shape.oscillator.stop();
-    shape.oscillator.disconnect();
-    shape.gain.disconnect();
+    
+    // Stoppa och koppla bort huvudoscillatorn
+    if (shape.oscillator) {
+      shape.oscillator.stop();
+      shape.oscillator.disconnect();
+    }
+    
+    // Koppla bort ljudkomponenter
+    if (shape.gain) shape.gain.disconnect();
     if (shape.stereoPanner) shape.stereoPanner.disconnect();
+    
+    // Rensa eventuella dry/wet-noder för reverb
+    if (shape.dryGain) shape.dryGain.disconnect();
+    if (shape.wetGain) shape.wetGain.disconnect();
   });
   scene.shapes = [];
 
@@ -461,7 +609,14 @@ export function resetScene(scene) {
   scene.panEnabled = false;
   scene.isPaused = false;
   scene.isLive = false;
-  scene.nodeRadius = 100;
+  scene.ambientModeActive = false;
+  
+  if (scene.updateNodeRadius) {
+    scene.updateNodeRadius(100);
+  } else {
+    scene.nodeRadius = 100;
+  }
+  
   if (scene.liveTimer) {
     scene.liveTimer.remove();
     scene.liveTimer = null;
@@ -492,4 +647,60 @@ export function resetScene(scene) {
   document.getElementById('chordSlider').style.setProperty('--thumb-color', scene.chordColors[0].color);
   document.getElementById('chordSlider').style.setProperty('--thumb-text', `"${scene.chordColors[0].key}"`);
   scene.defaultFrequencies = scene.chordColors[0].frequencies;
+
+  const aiAmbientButton = document.getElementById('aiAmbientButton');
+  if (aiAmbientButton) {
+    aiAmbientButton.style.background = '#333';
+  }
+}
+
+function setupLiveMode(scene) {
+  const baseDelay = 5000;
+  const speedFactor = Math.pow(1.5 / scene.particleSpeed, 1.5);
+  const delay = Math.max(1000, baseDelay * speedFactor);
+
+  scene.liveTimer = scene.time.addEvent({
+    delay: delay,
+    callback: () => {
+      console.log('Triggering live soundscape in setupLiveMode');
+      if (scene.shapes.length === 0) {
+        createRandomShapes(scene, Math.floor(Math.random() * 5) + 3); // Skapa noder om inga finns
+      }
+      scene.triggerLiveSoundscape();
+    },
+    loop: true
+  });
+}
+
+function createRandomShapes(scene, count) {
+  const shapeTypes = ['circle', 'yellowTriangle', 'triangle', 'square', 'purpleSquare', 'orangeSquare'];
+  const placedPositions = new Set();
+
+  for (let n = 0; n < count; n++) {
+    let attempts = 0;
+    let i, j;
+    do {
+      i = Math.floor(Math.random() * scene.gridCols);
+      j = Math.floor(Math.random() * scene.gridRows);
+      attempts++;
+      if (attempts > 30) break;
+    } while (
+      placedPositions.has(`${i},${j}`) ||
+      i * scene.gridSize + scene.gridSize / 2 < scene.playAreaLeft ||
+      i * scene.gridSize + scene.gridSize / 2 > scene.playAreaRight ||
+      j * scene.gridSize + scene.gridSize / 2 < scene.playAreaTop ||
+      j * scene.gridSize + scene.gridSize / 2 > scene.playAreaBottom
+    );
+  
+    if (attempts > 30) continue;
+  
+    placedPositions.add(`${i},${j}`);
+    const randomType = shapeTypes[Math.floor(Math.random() * shapeTypes.length)];
+    const mockPointer = { x: i * scene.gridSize + scene.gridSize / 2, y: j * scene.gridSize + scene.gridSize / 2 };
+    scene.placeShape(mockPointer, randomType);
+  }
+
+  scene.harmonicEnabled = false;
+  scene.panEnabled = true;
+  updateUI(scene, scene.particleCount, scene.particleSpeed, scene.masterVolume, scene.harmonicEnabled, scene.panEnabled);
 }

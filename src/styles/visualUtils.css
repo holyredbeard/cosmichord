@@ -79,28 +79,33 @@
 }
 
 .toggle-menu {
-  position: absolute;
-  bottom: 30px;
+  position: fixed;
+  bottom: 45px;
   left: 40px; /* Matcha .slider-container */
-  width: 50px;
+  width: auto;
+  height: auto;
+  min-width: 100px;
   z-index: 1002; /* Högsta z-index för att ligga över canvas */
   transition: transform 0.3s ease-in-out;
-  background: #333;
+  background: #1a1a1a;
   color: white;
   border: none;
-  padding: 8px 15px;
+  padding: 10px 12px;
   border-radius: 4px;
   font-family: Arial;
   cursor: pointer !important;
   -webkit-cursor: pointer;
   pointer-events: auto; /* Säkerställ klickbarhet */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
 }
 
 .toggle-menu span {
   display: inline-block;
-  width: 30px;
   text-align: center;
-  font-size: 18px;
+  font-size: 12px;
 }
 
 /* Behåll befintliga stilar för range-thumb och knappar */

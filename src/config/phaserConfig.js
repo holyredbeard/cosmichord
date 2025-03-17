@@ -1,7 +1,7 @@
 export default {
   type: Phaser.AUTO,
-  width: 600, // Matcha #renderDiv's 600px
-  height: 600, // Matcha #renderDiv's 600px
+  width: 800, // Ökat från 600px
+  height: 800, // Ökat från 600px
   scale: {
     mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.CENTER_BOTH,

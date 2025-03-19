@@ -1,71 +1,56 @@
 const path = require('path');
+const CopyWebpackPlugin = require('copy-webpack-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
-const CopyPlugin = require('copy-webpack-plugin');
 
 module.exports = {
-  entry: './src/main.js',
+  entry: './src/index.js',
   output: {
-    filename: 'bundle.js',
+    filename: '[name].[contenthash].js',
     path: path.resolve(__dirname, 'dist'),
-    clean: true,
-    publicPath: '/',
-    globalObject: 'this', // För Web Worker-kompatibilitet
+    clean: true
   },
   module: {
     rules: [
+      {
+        test: /\.css$/,
+        use: ['style-loader', 'css-loader']
+      },
       {
         test: /\.js$/,
         exclude: /node_modules/,
         use: {
           loader: 'babel-loader',
-        },
-      },
-      {
-        test: /\.(png|jpg|jpeg|gif)$/i,
-        type: 'asset/resource',
-        generator: {
-          outputPath: 'images/',
-        },
-      },
-      {
-        test: /\.worker\.js$/,
-        use: { loader: 'worker-loader' }, // Hanterar worker-filer
-      },
-      {
-        test: /\.css$/i,
-        use: ['style-loader', 'css-loader'],
-      },
-    ],
+          options: {
+            presets: ['@babel/preset-env']
+          }
+        }
+      }
+    ]
   },
   plugins: [
     new HtmlWebpackPlugin({
       template: './src/index.html',
-      filename: 'index.html',
-      inject: 'body',
+      filename: 'index.html'
     }),
-    new CopyPlugin({
+    new CopyWebpackPlugin({
       patterns: [
-        { from: 'src/utils/aiUtils.worker.js', to: 'utils/' },
-        { from: 'src/images/logo.png', to: 'images/' },
-      ],
-    }),
+        { from: 'src/images', to: 'images' }
+      ]
+    })
   ],
   devServer: {
-    static: path.join(__dirname, 'dist'),
-    compress: true,
-    port: 8080,
-    hot: false, // Håller det avstängt temporärt
-    open: true,
-    historyApiFallback: true,
-    watchFiles: ['src/**/*'],
-    client: {
-      overlay: false, // Stänger av overlay för att utesluta falska nätverksfel
+    static: {
+      directory: path.join(__dirname, 'dist'),
     },
-  },
-  devtool: 'inline-source-map',
-  target: 'web',
-  resolve: {
-    extensions: ['.js'],
-  },
-  mode: 'development',
+    compress: true,
+    port: 9000,
+    hot: true,
+    historyApiFallback: true,
+    client: {
+      overlay: {
+        errors: true,
+        warnings: false,
+      },
+    },
+  }
 };

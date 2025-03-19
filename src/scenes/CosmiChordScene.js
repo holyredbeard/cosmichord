@@ -24,7 +24,9 @@ class CosmiChordScene extends Phaser.Scene {
     this.visualResponses = [];
     this.currentVisualMode = VISUAL_MODES.CALM;
     this.lastAnalysisTime = 0;
-    this.visualAnalysisInterval = 2000; // Analysera var 2:a sekund
+    this.visualAnalysisInterval = 2000;
+    this.magentaLoaded = false;
+    this.modelsLoaded = false;
   }
 
   preload() {
@@ -70,20 +72,19 @@ class CosmiChordScene extends Phaser.Scene {
   }
 
   create() {
-    const logoImg = document.createElement('img');
-    logoImg.src = '../images/logo.png';
-    logoImg.style.position = 'absolute';
-    logoImg.style.top = '40px';
-    logoImg.style.left = '40px';
-    logoImg.style.width = '140px';
-    logoImg.style.height = 'auto';
-    logoImg.style.zIndex = '1000';
-    logoImg.style.transition = 'transform 0.3s ease-in-out';
-    logoImg.id = 'logoImg';
-    document.getElementById('renderDiv').appendChild(logoImg);
+    // Skapa logo
+    const logoImg = document.getElementById('logoImg');
+    if (!logoImg) {
+      const logo = document.createElement('img');
+      logo.id = 'logoImg';
+      logo.className = 'logo-img';
+      logo.src = '/images/logo.png';
+      logo.style.width = '180px';
+      document.body.appendChild(logo);
+    }
 
     this.masterVolume = 0.3;
-    this.audioContext = null; // Förblir null tills användaren klickar
+    this.audioContext = null;
     this.shapes = [];
     this.connectionGraphics = this.add.graphics({ lineStyle: { width: 4 } });
     this.connectionGraphics.setDepth(0);
@@ -103,8 +104,30 @@ class CosmiChordScene extends Phaser.Scene {
     this.reverbNode = null;
     this.reverbBuffer = null;
 
-    // Skapa en AI worker för generation av soundscapes
-    this.initializeAIWorker();
+    // Lägg till en knapp för att initiera AudioContext och Magenta.js
+    const startButton = document.createElement('button');
+    startButton.textContent = 'Start Audio & AI';
+    startButton.className = 'control-button';
+    startButton.style.position = 'absolute';
+    startButton.style.top = '20px';
+    startButton.style.left = '50%';
+    startButton.style.transform = 'translateX(-50%)';
+    startButton.style.zIndex = '1000';
+    startButton.onclick = async () => {
+      if (!this.audioContext) {
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        console.log('AudioContext initialized via Start button');
+        this.initializeReverb();
+        
+        // Initiera Magenta.js efter att AudioContext är redo
+        await this.initializeMagenta();
+        
+        startButton.style.display = 'none';
+      } else if (this.audioContext.state === 'suspended') {
+        await this.audioContext.resume();
+      }
+    };
+    document.body.appendChild(startButton);
 
     this.cameras.main.setBackgroundColor('#000000');
     this.gridSize = 60;
@@ -144,9 +167,6 @@ class CosmiChordScene extends Phaser.Scene {
     };
     checkTexture();
 
-    createUI(this);
-    handleUIEvents(this);
-
     this.draggedShape = null;
     this.isDragging = false;
     this.selectedNoteType = null;
@@ -157,11 +177,50 @@ class CosmiChordScene extends Phaser.Scene {
 
     this.defaultFrequencies = this.chordColors[0].frequencies;
 
+    this.time.delayedCall(300, () => {
+      // Kontrollera att renderDiv finns innan vi skapar UI
+      const renderDiv = document.getElementById('renderDiv');
+      if (!renderDiv) {
+        console.error('renderDiv not found, cannot create UI!');
+        return;
+      }
+      
+      console.log('Creating UI elements...');
+      createUI(this);
+      handleUIEvents(this);
+      console.log('UI elements created successfully');
+    }, [], this);
+
     this.activeHarmonics = new Map();
 
     this.bpm = 60;
     this.beatDuration = 60 / this.bpm;
     this.currentBeat = 0;
+  }
+
+  async initializeMagenta() {
+    try {
+      if (typeof mm === 'undefined') {
+        console.warn('Magenta.js not loaded yet, waiting...');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        return this.initializeMagenta();
+      }
+
+      console.log('Initializing Magenta.js models...');
+      
+      // Initiera endast MusicRNN modellen
+      this.music_rnn = new mm.MusicRNN('https://storage.googleapis.com/magentadata/js/checkpoints/music_rnn/basic_rnn');
+      await this.music_rnn.initialize();
+      console.log('MusicRNN model initialized');
+      
+      this.magentaLoaded = true;
+      this.modelsLoaded = true;
+    } catch (error) {
+      console.error('Error initializing Magenta.js:', error);
+      // Försök igen om det misslyckades
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      return this.initializeMagenta();
+    }
   }
 
   update() {
@@ -445,77 +504,27 @@ class CosmiChordScene extends Phaser.Scene {
 
   // Förbättrad setupShapeAudio
   setupShapeAudio(shape, frequency) {
+    if (!shape || !this.audioContext) return;
+    
     try {
-      // Skapa gain nod
+      // Skapa gain och panner
       shape.gain = this.audioContext.createGain();
-      shape.gain.gain.value = 0;
+      shape.gain.gain.value = 0; // Börja tyst
       
-      // Förbättrad filter
-      shape.filter = this.audioContext.createBiquadFilter();
-      shape.filter.type = 'lowpass';
-      shape.filter.frequency.value = this.ambientModeActive ? 2000 : 5000;
+      // Anslut oscillator -> gain -> destination
+      shape.oscillator.connect(shape.gain);
+      shape.gain.connect(this.audioContext.destination);
       
-      // Stereomixer
-      shape.stereoPanner = this.audioContext.createStereoPanner();
-      shape.stereoPanner.pan.value = this.panEnabled ? this.calculatePan(shape.i) : 0;
-      
-      // Ljudkopplingar
-      shape.oscillator.connect(shape.filter);
-      shape.filter.connect(shape.gain);
-      
-      // Reverb-koppling för ambient-läge
-      if (this.ambientModeActive && this.reverbNode) {
-        // Skapa wet/dry mix för bättre reverb
-        const dryGain = this.audioContext.createGain();
-        const wetGain = this.audioContext.createGain();
-        
-        dryGain.gain.value = 0.6; // 60% torr signal
-        wetGain.gain.value = 0.4; // 40% våt/reverb signal
-        
-        shape.gain.connect(dryGain);
-        shape.gain.connect(this.reverbNode);
-        this.reverbNode.connect(wetGain);
-        
-        dryGain.connect(shape.stereoPanner);
-        wetGain.connect(shape.stereoPanner);
-        
-        shape.dryGain = dryGain;
-        shape.wetGain = wetGain;
-      } else {
-        // Utan reverb för vanligt läge
-        shape.gain.connect(shape.stereoPanner);
-      }
-      
-      shape.stereoPanner.connect(this.audioContext.destination);
-      
-      // Lägg till suboscillator för mer fyllighet i ambient-läge
-      if (this.ambientModeActive) {
-        const subOscillator = this.audioContext.createOscillator();
-        subOscillator.type = 'sine';
-        subOscillator.frequency.value = frequency / 2; // En oktav ner
-        
-        const subGain = this.audioContext.createGain();
-        subGain.gain.value = 0.3; // 30% sub-nivå
-        
-        subOscillator.connect(subGain);
-        subGain.connect(shape.gain);
-        
-        subOscillator.start();
-        shape.subOscillator = subOscillator;
-        shape.subGain = subGain;
-      }
-      
-      // Starta ljud
+      // Starta oscillatorn
       shape.oscillator.start();
+      
+      // Sätt frekvens
       shape.frequency = frequency;
       
-      // Sätt initial volym
-      const volumeBoost = frequency <= 110 ? 1.5 : 1;
-      const targetVolume = 0.1 * volumeBoost * this.masterVolume;
-      shape.gain.gain.setTargetAtTime(targetVolume, this.audioContext.currentTime + 0.01, 0.2);
-      shape.baseVolume = 0.1 * volumeBoost;
-    } catch (err) {
-      console.error("Error in setupShapeAudio:", err);
+      return shape;
+    } catch (error) {
+      console.error('Error in setupShapeAudio:', error);
+      return null;
     }
   }
 
@@ -641,7 +650,8 @@ class CosmiChordScene extends Phaser.Scene {
   }
 
   frequencyToMidi(frequency) {
-    return 12 * Math.log2(frequency / 440) + 69;
+    if (!frequency) return 60; // C4 som standard
+    return Math.round(12 * Math.log2(frequency / 440) + 69);
   }
 
   applyVisualFeedback(shapesToBlink) {
@@ -792,7 +802,11 @@ class CosmiChordScene extends Phaser.Scene {
     2: { color: 'green', label: 'Minor', frequencies: [55, 220, 261.63, 293.66, 349.23, 415.30], key: '3' },
     3: { color: 'red', label: 'Bright', frequencies: [55, 220, 277.18, 329.63, 415.30, 493.88], key: '4' },
     4: { color: 'orange', label: 'Dreamy', frequencies: [55, 220, 246.94, 293.66, 369.99, 440], key: '5' },
-    5: { color: 'purple', label: 'Dark', frequencies: [55, 220, 261.63, 311.13, 369.99, 466.16], key: '6' }
+    5: { color: 'purple', label: 'Dark', frequencies: [55, 220, 261.63, 311.13, 369.99, 466.16], key: '6' },
+    6: { color: 'pink', label: 'Cosmic', frequencies: [55, 165, 220, 277.18, 329.63, 440], key: '7' },
+    7: { color: 'teal', label: 'Ethereal', frequencies: [65.41, 195.99, 261.63, 329.63, 392, 523.25], key: '8' },
+    8: { color: 'gold', label: 'Stellar', frequencies: [73.42, 110, 220, 293.66, 349.23, 440], key: '9' },
+    9: { color: 'silver', label: 'Galactic', frequencies: [82.41, 123.47, 164.81, 220, 329.63, 392], key: '0' }
   };
 
   handleControlSequence(sequence) {
@@ -940,33 +954,13 @@ class CosmiChordScene extends Phaser.Scene {
       'Minor': '#FFA500',
       'Bright': '#ffff00',
       'Dreamy': '#00ff00',
-      'Dark': '#ff0000'
+      'Dark': '#ff0000',
+      'Cosmic': '#ff69b4',
+      'Ethereal': '#008080',
+      'Stellar': '#ffd700',
+      'Galactic': '#c0c0c0'
     };
     return textColors[label] || '#0000ff';
-  }
-
-  // Förbered AI-arbetare för ljudgenerering
-  initializeAIWorker() {
-    if (window.Worker) {
-      this.aiWorker = new Worker('utils/aiUtils.worker.js');
-      console.log('AI Worker created for soundscape generation');
-      
-      this.aiWorker.onmessage = (e) => {
-        if (e.data.type === 'initialized') {
-          console.log('AI Worker initialized');
-        } else if (e.data.type === 'controlSequence') {
-          console.log('Received control sequence from AI Worker:', e.data.sequence);
-          this.handleControlSequence(e.data.sequence);
-        } else if (e.data.type === 'error') {
-          console.error('AI Worker error:', e.data.message);
-        }
-      };
-      
-      // Initialisera Magenta.js modeller i worker
-      this.aiWorker.postMessage({ type: 'initialize' });
-    } else {
-      console.warn('Web Workers not supported in this browser. AI generation will not be available.');
-    }
   }
 
   resetShapeToOriginalColor(shape) {
@@ -978,28 +972,71 @@ class CosmiChordScene extends Phaser.Scene {
   }
 
   setupInputListeners() {
+    // Används efter att UI-element skapats
+    const setupUIListeners = () => {
+      // RANDOM-knapp
+      const randomButton = document.getElementById('randomButton');
+      if (randomButton) {
+        randomButton.addEventListener('click', () => {
+          this.generateRandomShapes();
+        });
+      }
+
+      // LIVE-knapp
+      const liveButton = document.getElementById('liveButton');
+      if (liveButton) {
+        liveButton.addEventListener('click', () => {
+          this.toggleLiveMode();
+        });
+      }
+
+      // EVOLVE-knapp
+      const evolveButton = document.getElementById('evolveButton');
+      if (evolveButton) {
+        evolveButton.addEventListener('click', () => {
+          if (!this.audioContext || this.audioContext.state !== 'running') {
+            console.warn('AudioContext not ready');
+            return;
+          }
+          if (!this.magentaLoaded || !this.modelsLoaded) {
+            console.warn('Magenta.js not ready');
+            return;
+          }
+          this.startEvolutionProcess();
+        });
+      }
+
+      // AI AMBIENT-knapp
+      const aiAmbientButton = document.getElementById('aiAmbientButton');
+      if (aiAmbientButton) {
+        aiAmbientButton.addEventListener('click', () => {
+          if (!this.audioContext || this.audioContext.state !== 'running') {
+            console.warn('AudioContext not ready');
+            return;
+          }
+          if (!this.magentaLoaded || !this.modelsLoaded) {
+            console.warn('Magenta.js not ready');
+            return;
+          }
+          this.startAmbientGeneration();
+        });
+      }
+    };
+
+    // Försök sätta upp UI-lyssnare efter en kort fördröjning
+    setTimeout(setupUIListeners, 500);
+
     this.input.on('pointerdown', (pointer) => {
       if (!this.audioContext) {
-        this.audioContext = new (window.AudioContext || window.webkitAudioContext)(); // Initiera vid klick
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
         console.log('AudioContext initialized');
-        
-        // Initiera reverb när audiocontext skapas
         this.initializeReverb();
         
-        if (this.isLive && this.aiWorker) {
-          this.triggerLiveSoundscape(); // Trigga LIVE direkt efter klick om aktiverat
-        }
+        // Initiera Magenta.js efter att AudioContext är redo
+        this.initializeMagenta();
       } else if (this.audioContext.state === 'suspended') {
         this.audioContext.resume().then(() => {
           console.log('AudioContext resumed');
-          this.shapes.forEach(shape => {
-            if (shape.oscillator && shape.gain && shape.oscillator.state === 'suspended') {
-              shape.oscillator.start();
-            }
-          });
-          if (this.isLive && this.aiWorker) {
-            this.triggerLiveSoundscape(); // Trigga LIVE vid återupptag
-          }
         });
       }
     });
@@ -1009,7 +1046,7 @@ class CosmiChordScene extends Phaser.Scene {
     this.selectedNoteType = null;
 
     this.input.keyboard.on('keydown-SHIFT', () => {
-      document.getElementById('renderDiv').style.cursor = 'grab';
+      document.body.style.cursor = 'grab';
     });
 
     // Lägg till tangentbordskontroller för att välja nodtyper
@@ -1050,7 +1087,6 @@ class CosmiChordScene extends Phaser.Scene {
         customCursor.style.boxShadow = `0 0 10px rgba(${rgbColor.r}, ${rgbColor.g}, ${rgbColor.b}, 0.5)`;
         document.body.appendChild(customCursor);
         customCursor.style.display = 'block';
-        document.getElementById('renderDiv').style.cursor = 'none';
         const updatePosition = (e) => {
           requestAnimationFrame(() => {
             customCursor.style.left = `${e.clientX}px`;
@@ -1066,7 +1102,7 @@ class CosmiChordScene extends Phaser.Scene {
       this.input.keyboard.on(`keyup-${key}`, () => {
         const customCursor = document.getElementById('customCursor');
         if (customCursor) customCursor.remove();
-        document.getElementById('renderDiv').style.cursor = 'default';
+        document.body.style.cursor = 'default';
         document.removeEventListener('mousemove', this.updateCursorPosition);
         this.updateCursorPosition = null;
         this.selectedNoteType = null;
@@ -1074,7 +1110,7 @@ class CosmiChordScene extends Phaser.Scene {
     });
 
     this.input.keyboard.on('keyup-SHIFT', () => {
-      document.getElementById('renderDiv').style.cursor = 'default';
+      document.body.style.cursor = 'default';
       if (this.isDragging) {
         this.isDragging = false;
         this.draggedShape = null;
@@ -1107,7 +1143,7 @@ class CosmiChordScene extends Phaser.Scene {
         if (clickedShape) {
           this.draggedShape = clickedShape;
           this.isDragging = true;
-          document.getElementById('renderDiv').style.cursor = 'grabbing';
+          document.body.style.cursor = 'grabbing';
         }
       } else {
         this.placeShape(pointer, this.selectedNoteType);
@@ -1115,13 +1151,13 @@ class CosmiChordScene extends Phaser.Scene {
     });
 
     this.input.keyboard.on('keydown-CTRL', () => {
-      document.getElementById('renderDiv').style.cursor = '➖';
+      document.body.style.cursor = '➖';
     });
     this.input.keyboard.on('keydown-X', () => {
       let customCursor = document.getElementById('customCursor');
       if (customCursor) customCursor.remove();
       customCursor = document.createElement('div');
-      document.getElementById('renderDiv').style.cursor = 'none';
+      document.body.style.cursor = 'none';
       customCursor.id = 'customCursor';
       customCursor.style.position = 'fixed';
       customCursor.style.fontSize = '16px';
@@ -1144,7 +1180,7 @@ class CosmiChordScene extends Phaser.Scene {
       this.updateCursorPosition = updatePosition;
     });
     this.input.keyboard.on('keyup-X', () => {
-      document.getElementById('renderDiv').style.cursor = 'default';
+      document.body.style.cursor = 'default';
       const customCursor = document.getElementById('customCursor');
       if (customCursor) customCursor.remove();
       document.removeEventListener('mousemove', this.updateCursorPosition);
@@ -1152,7 +1188,7 @@ class CosmiChordScene extends Phaser.Scene {
     });
     this.input.keyboard.on('keyup-CTRL', () => {
       if (!this.input.keyboard.checkDown(this.input.keyboard.addKey('X'))) {
-        document.getElementById('renderDiv').style.cursor = 'default';
+        document.body.style.cursor = 'default';
       }
     });
     this.input.keyboard.on('keydown-Q', () => {
@@ -1248,17 +1284,172 @@ class CosmiChordScene extends Phaser.Scene {
 
     this.input.on('pointerup', () => {
       if (this.input.keyboard.checkDown(this.input.keyboard.addKey('SHIFT'))) {
-        document.getElementById('renderDiv').style.cursor = 'grab';
+        document.body.style.cursor = 'grab';
       }
       this.isDragging = false;
       this.draggedShape = null;
     });
+
+    this.input.keyboard.on('keydown-U', () => {
+      const chordIndex = 6;
+      document.getElementById('chordSlider').value = chordIndex;
+      const event = new Event('input');
+      document.getElementById('chordSlider').dispatchEvent(event);
+    });
+    this.input.keyboard.on('keydown-I', () => {
+      const chordIndex = 7;
+      document.getElementById('chordSlider').value = chordIndex;
+      const event = new Event('input');
+      document.getElementById('chordSlider').dispatchEvent(event);
+    });
+    this.input.keyboard.on('keydown-O', () => {
+      const chordIndex = 8;
+      document.getElementById('chordSlider').value = chordIndex;
+      const event = new Event('input');
+      document.getElementById('chordSlider').dispatchEvent(event);
+    });
+    this.input.keyboard.on('keydown-ZERO', () => {
+      const chordIndex = 9;
+      document.getElementById('chordSlider').value = chordIndex;
+      const event = new Event('input');
+      document.getElementById('chordSlider').dispatchEvent(event);
+    });
+  }
+
+  startEvolutionProcess() {
+    if (!this.audioContext || this.audioContext.state !== 'running') {
+      console.warn('AudioContext not ready');
+      return;
+    }
+
+    if (!this.magentaLoaded || !this.modelsLoaded) {
+      console.warn('Magenta.js not ready');
+      return;
+    }
+
+    if (this.shapes.length === 0) {
+      console.warn('No shapes to evolve');
+      return;
+    }
+
+    const shapesData = this.shapes.map(shape => ({
+      type: shape.type,
+      frequency: shape.frequency,
+      position: { x: shape.x, y: shape.y }
+    }));
+
+    this.generateEvolution(shapesData);
+  }
+
+  async generateEvolution(shapesData) {
+    try {
+      // Generera en sekvens med MusicRNN
+      const seed = {
+        notes: shapesData.map(shape => ({
+          pitch: this.frequencyToMidi(shape.frequency),
+          startTime: 0,
+          endTime: 1
+        })),
+        totalTime: 4
+      };
+
+      const result = await this.music_rnn.continueSequence(seed, {
+        temperature: 0.8,
+        steps: 32
+      });
+
+      // Konvertera sekvensen till ljud
+      this.playSoundscape(result.notes);
+    } catch (error) {
+      console.error('Error generating evolution:', error);
+    }
+  }
+
+  startAmbientGeneration() {
+    if (!this.audioContext || this.audioContext.state !== 'running') {
+      console.warn('AudioContext not ready');
+      return;
+    }
+
+    if (!this.magentaLoaded || !this.modelsLoaded) {
+      console.warn('Magenta.js not ready');
+      return;
+    }
+
+    if (this.shapes.length === 0) {
+      console.warn('No shapes to generate ambient from');
+      return;
+    }
+
+    const shapesData = this.shapes.map(shape => ({
+      type: shape.type,
+      frequency: shape.frequency,
+      position: { x: shape.x, y: shape.y }
+    }));
+
+    this.generateAmbient(shapesData);
+  }
+
+  async generateAmbient(shapesData) {
+    try {
+      // Generera ambient med MusicRNN
+      const seed = {
+        notes: shapesData.map(shape => ({
+          pitch: this.frequencyToMidi(shape.frequency),
+          startTime: 0,
+          endTime: 2
+        })),
+        totalTime: 4
+      };
+
+      const result = await this.music_rnn.continueSequence(seed, {
+        temperature: 0.2,  // Lägre temperatur för mer förutsägbart resultat
+        steps: 64         // Fler steg för längre sekvens
+      });
+
+      // Konvertera sekvensen till ljud med längre toner för ambient-känsla
+      const ambientNotes = result.notes.map(note => ({
+        ...note,
+        endTime: note.endTime * 2,  // Dubbla längden på tonerna
+        startTime: note.startTime * 2
+      }));
+
+      this.playSoundscape(ambientNotes);
+    } catch (error) {
+      console.error('Error generating ambient:', error);
+    }
+  }
+
+  playSoundscape(sequence) {
+    if (!this.audioContext || this.audioContext.state !== 'running') {
+      console.warn('AudioContext not ready');
+      return;
+    }
+
+    sequence.forEach(note => {
+      const shape = this.shapes[Math.floor(Math.random() * this.shapes.length)];
+      if (shape && shape.oscillator) {
+        const frequency = this.midiToFrequency(note.pitch);
+        shape.oscillator.frequency.setTargetAtTime(frequency, this.audioContext.currentTime + note.startTime, 0.1);
+        
+        const duration = note.endTime - note.startTime;
+        const volume = 0.3 * this.masterVolume;
+        
+        shape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
+        shape.gain.gain.setTargetAtTime(volume, this.audioContext.currentTime + note.startTime, 0.1);
+        shape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime + note.endTime, 0.1);
+      }
+    });
+  }
+
+  midiToFrequency(midi) {
+    return 440 * Math.pow(2, (midi - 69) / 12);
   }
 
   placeShape(pointer, type) {
     try {
       if (!this.audioContext) {
-        this.audioContext = createAudioContext();
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
         console.log('AudioContext initialized on shape placement');
         this.initializeReverb();
       }
@@ -1280,7 +1471,7 @@ class CosmiChordScene extends Phaser.Scene {
       const i = Math.floor(pointer.x / this.gridSize);
       const j = Math.floor(pointer.y / this.gridSize);
       
-      // Kolla om det redan finns en form på platsen - minimala beräkningar
+      // Kolla om det redan finns en form på platsen
       const existingShape = this.shapes.find(shape => shape.i === i && shape.j === j);
       if (existingShape) {
         // Ändra typ på befintlig nod eller ta bort den
@@ -1288,7 +1479,7 @@ class CosmiChordScene extends Phaser.Scene {
         return;
       }
   
-      // Skapa ny shape - mycket enklare än tidigare
+      // Skapa ny shape
       let shape = {};
       shape.i = i;
       shape.j = j;
@@ -1330,7 +1521,7 @@ class CosmiChordScene extends Phaser.Scene {
   updateExistingShape(existingShape, i, j) {
     try {
       // Mycket förenklad hantering av shape-uppdateringar
-      let newType, newFrequency;
+      let newType;
       const frequencies = [...this.chordColors[this.selectedChord]?.frequencies || this.defaultFrequencies];
       
       // Förenkla sekventiell ändring av typ
@@ -1345,7 +1536,7 @@ class CosmiChordScene extends Phaser.Scene {
           this.removeShape(existingShape);
           return;
       }
-      
+  
       // Uppdatera type och frequency
       existingShape.type = newType;
       existingShape.frequency = this.getFrequencyForType(newType, frequencies);
@@ -1359,7 +1550,7 @@ class CosmiChordScene extends Phaser.Scene {
       console.error("Error in updateExistingShape:", err);
     }
   }
-  
+
   // Hjälpmetod för att ta bort shapes säkert
   removeShape(shape) {
     try {
@@ -1390,7 +1581,7 @@ class CosmiChordScene extends Phaser.Scene {
       console.error("Error in removeShape:", err);
     }
   }
-  
+
   // Hjälpmetod för att få standardfrekvens för en formtyp
   getFrequencyForType(type, frequencies) {
     switch (type) {
@@ -1403,7 +1594,7 @@ class CosmiChordScene extends Phaser.Scene {
       default: return 440;
     }
   }
-  
+   
   // Hjälpmetod för att få oscillatortyp baserat på form
   getOscTypeForShape(type) {
     if (type === 'circle') return 'sine';
@@ -1411,7 +1602,7 @@ class CosmiChordScene extends Phaser.Scene {
     if (type === 'purpleSquare') return 'sawtooth';
     return 'square';
   }
-  
+
   // Uppdatera ljud för en befintlig shape
   updateShapeAudio(shape) {
     try {

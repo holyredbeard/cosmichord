@@ -86,6 +86,7 @@ export function createUI(scene) {
       <button id="liveButton" class="control-button">LIVE</button>
       <button id="aiAmbientButton" class="control-button">AMBIENT</button>
       <button id="ecosystemButton" class="control-button" style="background: linear-gradient(135deg, #1a4a1a, #2a6a2a);">ECOSYSTEM</button>
+      <button id="weatherButton" class="control-button" style="background: linear-gradient(135deg, #4a4a8a, #6a6aaa);">WEATHER OFF</button>
     `;
     sliderContainer.appendChild(randomContainer);
 

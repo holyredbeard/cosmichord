@@ -221,7 +221,7 @@ class CosmiChordScene extends Phaser.Scene {
       windY: 0,
       windChangeTime: 0,
       intensity: 0.5,
-      enabled: true
+      enabled: false // AV som standard
     };
     
     // Andnings-cykel
@@ -999,6 +999,30 @@ class CosmiChordScene extends Phaser.Scene {
     }
   }
   
+  // Toggle väder-system
+  toggleWeather() {
+    this.weather.enabled = !this.weather.enabled;
+    const weatherButton = document.getElementById('weatherButton');
+    
+    if (this.weather.enabled) {
+      console.log('Weather system activated');
+      if (weatherButton) {
+        weatherButton.style.background = 'linear-gradient(135deg, #6a6aaa, #8a8aca)';
+        weatherButton.textContent = 'WEATHER ON';
+      }
+    } else {
+      console.log('Weather system deactivated');
+      if (weatherButton) {
+        weatherButton.style.background = 'linear-gradient(135deg, #4a4a8a, #6a6aaa)';
+        weatherButton.textContent = 'WEATHER OFF';
+      }
+      
+      // Återställ vind
+      this.weather.windX = 0;
+      this.weather.windY = 0;
+    }
+  }
+  
   // Åldrande-system
   updateAging() {
     const now = Date.now();
@@ -1773,6 +1797,14 @@ class CosmiChordScene extends Phaser.Scene {
             return;
           }
           this.toggleEcosystem();
+        });
+      }
+
+      // WEATHER-knapp
+      const weatherButton = document.getElementById('weatherButton');
+      if (weatherButton) {
+        weatherButton.addEventListener('click', () => {
+          this.toggleWeather();
         });
       }
 

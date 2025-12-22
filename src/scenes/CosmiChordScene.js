@@ -1121,7 +1121,14 @@ class CosmiChordScene extends Phaser.Scene {
       // Ärv inställningar
       waveformType: inheritedSettings.waveformType || 'sine',
       filterType: inheritedSettings.filterType || 'none',
-      lfoMode: inheritedSettings.lfoMode || 'none'
+      lfoMode: inheritedSettings.lfoMode || 'none',
+      // Lägg till alla interaktiva egenskaper som manuella noder har
+      radius: 100,
+      baseVolume: 0.1,
+      currentVolume: 0.1,
+      isBlending: false,
+      pulseDirection: 1,
+      pulseScale: 1
     };
     
     // Skapa grafik

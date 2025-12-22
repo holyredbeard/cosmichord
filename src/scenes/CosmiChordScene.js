@@ -210,6 +210,24 @@ class CosmiChordScene extends Phaser.Scene {
     this.bpm = 60;
     this.beatDuration = 60 / this.bpm;
     this.currentBeat = 0;
+    
+    // Åldrande-system
+    this.agingEnabled = true;
+    this.ageSpeed = 1.0; // 1.0 = normal hastighet
+    
+    // Väder-system
+    this.weather = {
+      windX: 0,
+      windY: 0,
+      windChangeTime: 0,
+      intensity: 0.5,
+      enabled: true
+    };
+    
+    // Andnings-cykel
+    this.breathPhase = 0;
+    this.breathSpeed = 0.0002;
+    this.breathingEnabled = true;
   }
 
   async initializeMagenta() {
@@ -240,6 +258,21 @@ class CosmiChordScene extends Phaser.Scene {
   update() {
     // Rensa tidigare linjer
     this.connectionGraphics.clear();
+    
+    // Uppdatera åldrande-system
+    if (this.agingEnabled) {
+      this.updateAging();
+    }
+    
+    // Uppdatera väder-system
+    if (this.weather.enabled) {
+      this.updateWeather();
+    }
+    
+    // Uppdatera andnings-cykel
+    if (this.breathingEnabled) {
+      this.updateBreathing();
+    }
     
     // Uppdatera ekosystem om aktiverat
     if (this.ecosystemEnabled) {
@@ -797,6 +830,11 @@ class CosmiChordScene extends Phaser.Scene {
           this.connectionGraphics.lineStyle(2 + intensity * 3, 0x00ff88, 0.3 + intensity * 0.5);
           this.connectionGraphics.lineBetween(shape1.x, shape1.y, shape2.x, shape2.y);
           
+          // Bioluminescens-reaktion
+          if (intensity > 0.5 && Math.random() > 0.95) {
+            this.createBioluminescence(shape1, shape2, intensity);
+          }
+          
           // Harmonisk resonans - justera volym (lugnt)
           if (shape1.gain && shape2.gain) {
             const resonanceBoost = 0.05 * intensity;
@@ -873,6 +911,133 @@ class CosmiChordScene extends Phaser.Scene {
         if (shape.graphics) {
           shape.graphics.alpha = 1;
         }
+      }
+    });
+  }
+  
+  // Andnings-cykel
+  updateBreathing() {
+    this.breathPhase += this.breathSpeed;
+    const breathFactor = (Math.sin(this.breathPhase) + 1) / 2;
+    
+    // Applicera på master volym
+    const baseMasterVolume = 0.3;
+    this.masterVolume = baseMasterVolume + breathFactor * 0.1;
+    
+    // Applicera på alla noder med subtila variationer
+    this.shapes.forEach((shape, index) => {
+      if (shape.gain && this.audioContext) {
+        // Varje nod andas med liten fasförskjutning för organisk känsla
+        const nodePhaseOffset = index * 0.2;
+        const nodeBreathFactor = (Math.sin(this.breathPhase + nodePhaseOffset) + 1) / 2;
+        const baseVolume = shape.baseVolume || 0.1;
+        const targetVolume = baseVolume * (0.8 + nodeBreathFactor * 0.4);
+        
+        shape.gain.gain.setTargetAtTime(targetVolume, this.audioContext.currentTime, 0.5);
+      }
+    });
+  }
+  
+  // Bioluminescens-reaktion
+  createBioluminescence(shape1, shape2, intensity) {
+    // Skapa ljusblixt
+    const flash = this.add.graphics();
+    const midX = (shape1.x + shape2.x) / 2;
+    const midY = (shape1.y + shape2.y) / 2;
+    const flashSize = 10 + intensity * 20;
+    
+    // Flerlager effekt för bioluminescens
+    flash.fillStyle(0xffffff, 0.9);
+    flash.fillCircle(midX, midY, flashSize);
+    flash.fillStyle(0x88ff88, 0.6);
+    flash.fillCircle(midX, midY, flashSize * 1.5);
+    flash.fillStyle(0x44ff44, 0.3);
+    flash.fillCircle(midX, midY, flashSize * 2);
+    
+    // Fade ut blixt
+    this.tweens.add({
+      targets: flash,
+      alpha: 0,
+      duration: 800,
+      ease: 'Sine.easeOut',
+      onComplete: () => flash.destroy()
+    });
+    
+    // Ljudreaktion - kort resonansburst
+    if (shape1.gain && shape2.gain && this.audioContext) {
+      const burstVolume = 0.3 + intensity * 0.2;
+      shape1.gain.gain.setTargetAtTime(burstVolume, this.audioContext.currentTime, 0.01);
+      shape2.gain.gain.setTargetAtTime(burstVolume, this.audioContext.currentTime, 0.01);
+      
+      // Snabb fade tillbaka
+      setTimeout(() => {
+        shape1.gain.gain.setTargetAtTime(0.1, this.audioContext.currentTime, 0.1);
+        shape2.gain.gain.setTargetAtTime(0.1, this.audioContext.currentTime, 0.1);
+      }, 200);
+    }
+  }
+  
+  // Väder-system
+  updateWeather() {
+    const now = Date.now();
+    
+    // Ändra vindriktning periodiskt
+    if (now > this.weather.windChangeTime) {
+      this.weather.windX = Math.sin(now * 0.0001) * 2 * this.weather.intensity;
+      this.weather.windY = Math.cos(now * 0.00015) * 2 * this.weather.intensity;
+      this.weather.windChangeTime = now + 5000; // Ändra var 5:e sekund
+      
+      // Applicera vind på partiklar
+      this.particles.forEach(particle => {
+        if (particle.body) {
+          particle.setVelocity(
+            particle.body.velocity.x + this.weather.windX,
+            particle.body.velocity.y + this.weather.windY
+          );
+        }
+      });
+    }
+  }
+  
+  // Åldrande-system
+  updateAging() {
+    const now = Date.now();
+    
+    this.shapes.forEach(shape => {
+      if (!shape.birthTime) return;
+      
+      // Beräkna ålder
+      const ageMs = (now - shape.birthTime) * this.ageSpeed;
+      shape.age = ageMs / shape.maxAge;
+      
+      // Uppdatera åldersstatus
+      shape.isYoung = shape.age < 0.3;
+      shape.isOld = shape.age > 0.7;
+      
+      // Färgförändring baserat på ålder
+      if (shape.graphics && shape.age > 0.5) {
+        const fadeFactor = Math.max(0.3, 1 - (shape.age - 0.5) * 2);
+        const baseColor = this.getShapeColor(shape.type, activeTheme);
+        
+        // Gör färgen mörkare med åldern
+        const r = Math.floor(((baseColor >> 16) & 0xFF) * fadeFactor);
+        const g = Math.floor(((baseColor >> 8) & 0xFF) * fadeFactor);
+        const b = Math.floor((baseColor & 0xFF) * fadeFactor);
+        const agedColor = (r << 16) | (g << 8) | b;
+        
+        shape.graphics.tint = agedColor;
+      }
+      
+      // Ljudförändring - äldre noder får djupare ljud
+      if (shape.oscillator && shape.isOld && this.audioContext) {
+        const agePitchShift = 1 - (shape.age * 0.2); // Sänk frekvens med 20% vid max ålder
+        const targetFreq = shape.frequency * agePitchShift;
+        shape.oscillator.frequency.setTargetAtTime(targetFreq, this.audioContext.currentTime, 2);
+      }
+      
+      // Naturlig död vid max ålder
+      if (shape.age >= 1.0 && this.shapes.length > this.minNodes) {
+        this.killNode(shape);
       }
     });
   }
@@ -1002,6 +1167,13 @@ class CosmiChordScene extends Phaser.Scene {
       shape.gain.gain.setValueAtTime(0, this.audioContext.currentTime);
       shape.gain.gain.linearRampToValueAtTime(0.1 * this.masterVolume, this.audioContext.currentTime + 3);
     }
+    
+    // Åldrande-system - sätt födelsedata
+    shape.birthTime = Date.now();
+    shape.age = 0;
+    shape.maxAge = 60000 + Math.random() * 120000; // 1-3 minuter
+    shape.isYoung = true;
+    shape.isOld = false;
     
     this.shapes.push(shape);
     console.log(`✨ Node born at (${x.toFixed(0)}, ${y.toFixed(0)}) with freq ${frequency.toFixed(0)}Hz, waveform: ${shape.waveformType}, filter: ${shape.filterType}, lfo: ${shape.lfoMode}`);

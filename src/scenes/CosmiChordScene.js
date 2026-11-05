@@ -2055,6 +2055,31 @@ class CosmiChordScene extends Phaser.Scene {
     return shape;
   }
 
+  async generateRandomShapes() {
+    try {
+      await this.ensureAudio();
+      if (!this.audioContext) return;
+
+      this.shapes.slice().forEach(shape => this.removeShape(shape));
+
+      const types = ['circle', 'yellowTriangle', 'triangle', 'square', 'purpleSquare', 'orangeSquare'];
+      const count = Phaser.Math.Between(4, 8);
+      const placed = [];
+      let attempts = 0;
+      while (placed.length < count && attempts < 48) {
+        attempts += 1;
+        const x = Phaser.Math.Between(this.playAreaLeft + 50, this.playAreaRight - 50);
+        const y = Phaser.Math.Between(this.playAreaTop + 50, this.playAreaBottom - 50);
+        const crowded = placed.some(shape => Phaser.Math.Distance.Between(shape.x, shape.y, x, y) < 100);
+        if (crowded) continue;
+        const shape = await this.placeShape({ x, y }, types[placed.length % types.length]);
+        if (shape) placed.push(shape);
+      }
+    } catch (error) {
+      console.error('generateRandomShapes failed', error);
+    }
+  }
+
   async placeShape(pointer, type) {
     try {
       await this.ensureAudio();

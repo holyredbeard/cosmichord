@@ -72,7 +72,11 @@ class CosmiChordScene extends Phaser.Scene {
   }
 
   create() {
-    this.masterVolume = 0.65;
+    this.masterVolume = 0.5;
+    this.maxSoundingVoices = 6;
+    // Summan av rösternas gain * osc-topp ska hålla sig under ~0.7 före master.
+    this.voicePeakBudget = 0.7;
+    this.oscPeak = 1.25;
     this.audioContext = null;
     this.audioUnlocked = false;
     this.shapes = [];
@@ -190,6 +194,7 @@ class CosmiChordScene extends Phaser.Scene {
     if (!this.audioContext || this.audioContext.state === 'closed') {
       this.audioContext = new AudioCtx();
       console.log('AudioContext initialized');
+      this.installMasterBus();
       this.initializeReverb();
       this.initializeMagenta();
     }
@@ -212,6 +217,76 @@ class CosmiChordScene extends Phaser.Scene {
     const running = this.audioContext.state === 'running';
     if (running) this.markAudioReady();
     return running;
+  }
+
+  installMasterBus() {
+    if (!this.audioContext || this.masterGain) return;
+    const ctx = this.audioContext;
+    this.masterGain = ctx.createGain();
+    this.masterGain.gain.value = Math.min(Math.max(this.masterVolume, 0), 1);
+
+    // Mjuk begränsare efter mastern. Vanliga nivåer passerar; toppar kläms före destination.
+    this.compressor = ctx.createDynamicsCompressor();
+    this.compressor.threshold.value = -8;
+    this.compressor.knee.value = 12;
+    this.compressor.ratio.value = 8;
+    this.compressor.attack.value = 0.005;
+    this.compressor.release.value = 0.22;
+
+    this.masterGain.connect(this.compressor);
+    this.compressor.connect(ctx.destination);
+  }
+
+  applyMasterVolume() {
+    if (!this.audioContext) return;
+    this.installMasterBus();
+    const level = Math.min(Math.max(this.masterVolume || 0, 0), 1);
+    this.masterGain.gain.setTargetAtTime(level, this.audioContext.currentTime, 0.05);
+  }
+
+  outputNode() {
+    this.installMasterBus();
+    return this.masterGain;
+  }
+
+  // LIVE / Magenta sätter en önskad styrka (0–1). Mixern skalar den inom budgeten.
+  requestAccent(shape, strength, duration) {
+    if (!shape) return;
+    const now = this.audioContext ? this.audioContext.currentTime : 0;
+    shape.accent = Math.min(Math.max(strength, 0), 1);
+    shape.accentUntil = now + Math.max(duration || 0.4, 0.05);
+  }
+
+  mixVoices() {
+    if (!this.audioContext || this.audioContext.state !== 'running') return;
+    this.installMasterBus();
+    const now = this.audioContext.currentTime;
+    const voices = this.shapes.filter(shape => shape && shape.gain);
+    if (!voices.length) return;
+
+    voices.forEach(shape => {
+      if (!shape.accentUntil || shape.accentUntil < now) shape.accent = 0;
+      const proximity = Math.min(Math.max(shape._proximityLevel || 0, 0), 1);
+      shape._desired = Math.min(1, Math.max(proximity, shape.accent || 0));
+    });
+
+    const ranked = voices.slice().sort((a, b) => b._desired - a._desired);
+    ranked.forEach((shape, index) => {
+      if (index >= this.maxSoundingVoices) shape._desired = 0;
+    });
+
+    const maxSumGain = this.voicePeakBudget / this.oscPeak;
+    const soloCap = Math.min(0.32, maxSumGain);
+    const sumDesired = voices.reduce((sum, shape) => sum + shape._desired, 0);
+    const unit = sumDesired > 0 ? Math.min(soloCap, maxSumGain / sumDesired) : 0;
+
+    voices.forEach(shape => {
+      const target = this.isPaused ? 0 : Math.min(soloCap, shape._desired * unit);
+      shape.currentVolume = target;
+      if (Math.abs(shape.gain.gain.value - target) > 0.015) {
+        shape.gain.gain.setTargetAtTime(target, now, this.isPaused ? 0.05 : 0.08);
+      }
+    });
   }
 
   resumeMagentaContext() {
@@ -447,12 +522,15 @@ class CosmiChordScene extends Phaser.Scene {
         proximity = Math.max(0, Math.min(1, 1 - (closestDistance / radius)));
       }
       proximity = Math.pow(proximity, 1.15);
-      // Vila-nivå så en placerad orb hörs direkt; partiklar sväller volymen.
-      let volume = (0.22 + 0.78 * proximity) * 0.9;
+      // Relativ styrka 0–1. Mastern och röstbudgeten skalar den faktiska gainen.
+      let volume = 0.75 + 0.25 * proximity;
 
       if (!connections.size || !this.harmonicEnabled) {
-        if (isFinite(shape.frequency) && this.audioContext && this.audioContext.state === 'running') {
-          shape.oscillator.frequency.setTargetAtTime(shape.frequency, this.audioContext.currentTime, 0.1);
+        if (isFinite(shape.frequency) && shape.oscillator && this.audioContext && this.audioContext.state === 'running') {
+          if (shape._freqTarget !== shape.frequency) {
+            shape.oscillator.frequency.setTargetAtTime(shape.frequency, this.audioContext.currentTime, 0.08);
+            shape._freqTarget = shape.frequency;
+          }
         }
       } else if (this.harmonicEnabled) {
         const connectedShapes = Array.from(connections).map(key => {
@@ -471,37 +549,30 @@ class CosmiChordScene extends Phaser.Scene {
             const rootFrequency = Math.min(baseFreq, ...connectedFreqs);
             
             // Välj en harmonisk ton
-            const interval = harmonicIntervals[Math.floor(Math.random() * harmonicIntervals.length)];
+            const interval = harmonicIntervals[connections.size % harmonicIntervals.length];
             const targetFreq = rootFrequency * interval;
-            
-            // Mjuk övergång till den harmoniska tonen
-            shape.oscillator.frequency.setTargetAtTime(targetFreq, this.audioContext.currentTime, 2.0);
-            
+            if (shape.oscillator && shape._freqTarget !== targetFreq) {
+              shape.oscillator.frequency.setTargetAtTime(targetFreq, this.audioContext.currentTime, 0.4);
+              shape._freqTarget = targetFreq;
+            }
             volume *= 0.9;
           }
         }
       }
 
       shape.baseVolume = volume;
-      const frequencyBoost = (shape.frequency <= 110) ? 1.2 : (shape.frequency <= 220 ? 1.1 : 1);
-      shape.currentVolume = shape.baseVolume * this.masterVolume * frequencyBoost;
+      shape._proximityLevel = Math.min(Math.max(volume, 0), 1);
 
-      if (this.audioContext && this.audioContext.state === 'running' && shape.gain && !this.isPaused) {
-        const safeVolume = isFinite(shape.currentVolume) ? shape.currentVolume : 0;
-        const clampedVolume = Math.min(Math.max(safeVolume, 0), 0.9);
-        // Avbryt inte automationen varje frame — det kan lämna gain fast nära 0.
-        if (Math.abs(shape.gain.gain.value - clampedVolume) > 0.02) {
-          const volumeTransitionTime = Math.max(0.05, 0.12 * (1.5 / this.particleSpeed));
-          shape.gain.gain.setTargetAtTime(clampedVolume, this.audioContext.currentTime, volumeTransitionTime);
-        }
-
-        if (this.panEnabled && shape.stereoPanner) {
-          const panValue = this.calculatePan(shape.i);
-          shape.stereoPanner.pan.cancelScheduledValues(this.audioContext.currentTime);
-          shape.stereoPanner.pan.setTargetAtTime(panValue, this.audioContext.currentTime, 0.05);
+      if (this.panEnabled && shape.stereoPanner && this.audioContext && this.audioContext.state === 'running') {
+        const panValue = this.calculatePan(shape.i);
+        if (shape._panTarget !== panValue) {
+          shape.stereoPanner.pan.setTargetAtTime(panValue, this.audioContext.currentTime, 0.08);
+          shape._panTarget = panValue;
         }
       }
     });
+
+    this.mixVoices();
     
     // Uppdatera beat för timing
     this.currentBeat = Math.floor(this.time.now / 1000 / this.beatDuration) % 4;
@@ -558,9 +629,9 @@ class CosmiChordScene extends Phaser.Scene {
       shape.gain = this.audioContext.createGain();
       shape.gain.gain.value = 0; // Börja tyst
       
-      // Anslut oscillator -> gain -> destination
+      // Oscillator -> röst-gain -> master -> kompressor -> destination
       shape.oscillator.connect(shape.gain);
-      shape.gain.connect(this.audioContext.destination);
+      shape.gain.connect(this.outputNode());
       
       // Starta oscillatorn
       shape.oscillator.start();
@@ -603,7 +674,7 @@ class CosmiChordScene extends Phaser.Scene {
       }
       
       convolver.buffer = buffer;
-      convolver.connect(this.audioContext.destination);
+      convolver.connect(this.outputNode());
       this.reverbNode = convolver;
       
       console.log('Improved reverb initialized');
@@ -788,7 +859,9 @@ class CosmiChordScene extends Phaser.Scene {
       if (!oscillator) return;
       const gain = this.audioContext.createGain();
       const stereoPanner = this.audioContext.createStereoPanner();
-      oscillator.connect(gain).connect(stereoPanner).connect(this.audioContext.destination);
+      oscillator.connect(gain);
+      gain.connect(stereoPanner);
+      stereoPanner.connect(this.outputNode());
       oscillator.start();
       stereoPanner.pan.setValueAtTime(this.panEnabled ? this.calculatePan(shapeData.i) : 0, this.audioContext.currentTime);
       gain.gain.setTargetAtTime(0.01 * (frequency <= 110 ? 1.5 : 1), this.audioContext.currentTime + 0.01, 0.1);
@@ -863,11 +936,6 @@ class CosmiChordScene extends Phaser.Scene {
     }
 
     console.log('Received control sequence from AI Worker:', sequence);
-    this.shapes.forEach(shape => {
-      if (shape.gain) {
-        shape.gain.gain.cancelScheduledValues(this.audioContext.currentTime).setValueAtTime(0, this.audioContext.currentTime);
-      }
-    });
 
     sequence.forEach(event => {
       console.log('Processing event:', event);
@@ -931,12 +999,12 @@ class CosmiChordScene extends Phaser.Scene {
           }
         }
 
-        // Volym
-        const volumeBoost = event.frequency <= 110 ? 1.5 : 1;
-        const targetVolume = this.masterVolume * volumeBoost * (shape.visible ? 1 : 0);
-        shape.gain.gain.cancelScheduledValues(this.audioContext.currentTime).setValueAtTime(0, this.audioContext.currentTime);
-        shape.gain.gain.linearRampToValueAtTime(targetVolume, this.audioContext.currentTime + (event.duration || 1));
-        shape.gain.gain.linearRampToValueAtTime(0, this.audioContext.currentTime + (event.duration || 1) + 0.5);
+        // Volym går via röstbudgeten, inte rakt till destination.
+        if (shape.visible === false) {
+          this.requestAccent(shape, 0, 0.05);
+        } else {
+          this.requestAccent(shape, 0.85, event.duration || 1);
+        }
 
         // Pan (om aktiverat)
         if (this.panEnabled && shape.stereoPanner) {
@@ -1297,14 +1365,6 @@ class CosmiChordScene extends Phaser.Scene {
         this.draggedShape.j = clampedJ;
 
         if (this.draggedShape.gain) {
-          this.draggedShape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
-          this.draggedShape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.01);
-          this.draggedShape.gain.gain.setTargetAtTime(
-            this.draggedShape.baseVolume * this.masterVolume * (this.draggedShape.frequency <= 110 ? 1.5 : 1),
-            this.audioContext.currentTime + 0.01,
-            0.05
-          );
-
           if (this.panEnabled && this.draggedShape.stereoPanner) {
             const panValue = this.calculatePan(clampedI);
             this.draggedShape.stereoPanner.pan.cancelScheduledValues(this.audioContext.currentTime);
@@ -1458,18 +1518,17 @@ class CosmiChordScene extends Phaser.Scene {
       return;
     }
 
-    sequence.forEach(note => {
-      const shape = this.shapes[Math.floor(Math.random() * this.shapes.length)];
+    if (!this.shapes.length || !sequence) return;
+    const heard = Math.min(sequence.length, this.maxSoundingVoices || 6);
+    sequence.slice(0, heard).forEach((note, index) => {
+      const shape = this.shapes[index % this.shapes.length];
       if (shape && shape.oscillator) {
         const frequency = this.midiToFrequency(note.pitch);
-        shape.oscillator.frequency.setTargetAtTime(frequency, this.audioContext.currentTime + note.startTime, 0.1);
-        
-        const duration = note.endTime - note.startTime;
-        const volume = 0.3 * this.masterVolume;
-        
-        shape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
-        shape.gain.gain.setTargetAtTime(volume, this.audioContext.currentTime + note.startTime, 0.1);
-        shape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime + note.endTime, 0.1);
+        const when = this.audioContext.currentTime + (note.startTime || 0);
+        shape.oscillator.frequency.setTargetAtTime(frequency, when, 0.08);
+        shape._freqTarget = frequency;
+        const duration = Math.max((note.endTime || 1) - (note.startTime || 0), 0.2);
+        this.requestAccent(shape, 0.8, (note.startTime || 0) + duration);
       }
     });
   }

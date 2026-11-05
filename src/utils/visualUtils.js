@@ -58,8 +58,8 @@ export function createUI(scene) {
     const volumeContainer = document.createElement('div');
     volumeContainer.className = 'slider-item';
     volumeContainer.innerHTML = `
-      <label>Volume: <span id="volumeValue">0.65</span></label>
-      <input type="range" min="0" max="1" value="0.65" step="0.01" id="volumeSlider">
+      <label>Volume: <span id="volumeValue">0.50</span></label>
+      <input type="range" min="0" max="1" value="0.50" step="0.01" id="volumeSlider">
     `;
     sliderContainer.appendChild(volumeContainer);
 
@@ -167,6 +167,7 @@ export function handleUIEvents(scene) {
     const volume = parseFloat(e.target.value);
     document.getElementById('volumeValue').textContent = volume.toFixed(2);
     scene.masterVolume = volume;
+    if (typeof scene.applyMasterVolume === 'function') scene.applyMasterVolume();
   });
 
   document.getElementById('blendToggle').addEventListener('click', () => {
@@ -257,20 +258,7 @@ export function handleUIEvents(scene) {
         // Mute all sounds
         scene.shapes.forEach(shape => {
           if (shape.gain) {
-            shape.gain.gain.cancelScheduledValues(scene.audioContext.currentTime);
-            shape.gain.gain.setTargetAtTime(0, scene.audioContext.currentTime, 0.1);
-          }
-        });
-      } else {
-        // Restore volumes
-        scene.shapes.forEach(shape => {
-          if (shape.gain) {
-            shape.gain.gain.cancelScheduledValues(scene.audioContext.currentTime);
-            shape.gain.gain.setTargetAtTime(
-              shape.baseVolume * scene.masterVolume,
-              scene.audioContext.currentTime,
-              0.1
-            );
+            shape.gain.gain.setTargetAtTime(0, scene.audioContext.currentTime, 0.05);
           }
         });
       }

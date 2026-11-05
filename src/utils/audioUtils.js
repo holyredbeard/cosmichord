@@ -95,7 +95,8 @@ export function createOscillator(audioContext, frequency, oscType) {
   const harmonic = audioContext.createOscillator();
   harmonic.type = 'sine';
   const harmonicGain = audioContext.createGain();
-  harmonicGain.gain.value = freq < 180 ? 0.55 : 0.22;
+  // Övertonen är tystare så två oscillatorer per nod inte summerar över 0 dB.
+  harmonicGain.gain.value = freq < 180 ? 0.22 : 0.12;
   harmonic.frequency.value = freq * 2;
   harmonic.connect(harmonicGain);
 

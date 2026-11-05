@@ -2,29 +2,42 @@ import { themes, activeTheme } from '../config/themes';
 
 export function createUI(scene) {
   try {
-    // Skapa sliderContainer och lägg den direkt i body först
+    let sidebar = document.getElementById('sidebar');
+    if (!sidebar) {
+      sidebar = document.createElement('aside');
+      sidebar.id = 'sidebar';
+      const renderDiv = document.getElementById('renderDiv');
+      if (renderDiv && renderDiv.parentNode) {
+        renderDiv.parentNode.insertBefore(sidebar, renderDiv);
+      } else {
+        document.body.appendChild(sidebar);
+      }
+    }
+
+    // Kontroller sitter i den vänstra panelen, inte ovanpå canvasen.
     const sliderContainer = document.createElement('div');
     sliderContainer.id = 'sliderContainer';
     sliderContainer.className = 'slider-container';
     sliderContainer.style.display = 'block';
-    document.body.appendChild(sliderContainer);
+    sidebar.appendChild(sliderContainer);
     
-    // Lägg till logo direkt till body
     const logoImg = document.getElementById('logoImg');
     if (!logoImg) {
       const logo = document.createElement('img');
       logo.id = 'logoImg';
       logo.className = 'logo-img';
       logo.src = '/images/logo.png';
-      logo.style.position = 'absolute';
-      logo.style.top = '40px';
-      logo.style.left = '40px';
-      logo.style.width = '180px';
-      logo.style.height = 'auto';
-      logo.style.zIndex = '1000';
-      logo.style.transition = 'transform 0.3s ease-in-out';
-      document.body.appendChild(logo);
+      logo.alt = 'CosmiChord';
+      sliderContainer.appendChild(logo);
     }
+
+    const audioBlock = document.createElement('div');
+    audioBlock.className = 'audio-block';
+    audioBlock.innerHTML = `
+      <button id="startAudioButton" class="control-button" type="button">Enable audio</button>
+      <p id="audioHint" class="audio-hint">Click or tap anywhere to enable sound. A placed orb plays right away and swells when a particle passes.</p>
+    `;
+    sliderContainer.appendChild(audioBlock);
 
     const particleCountContainer = document.createElement('div');
     particleCountContainer.className = 'slider-item';
@@ -45,15 +58,13 @@ export function createUI(scene) {
     const volumeContainer = document.createElement('div');
     volumeContainer.className = 'slider-item';
     volumeContainer.innerHTML = `
-      <label>Volume: <span id="volumeValue">0.3</span></label>
-      <input type="range" min="0" max="0.5" value="0.3" step="0.1" id="volumeSlider">
+      <label>Volume: <span id="volumeValue">0.65</span></label>
+      <input type="range" min="0" max="1" value="0.65" step="0.01" id="volumeSlider">
     `;
     sliderContainer.appendChild(volumeContainer);
 
     const blendContainer = document.createElement('div');
-    blendContainer.style.display = 'flex';
-    blendContainer.style.gap = '10px';
-    blendContainer.style.marginTop = '10px';
+    blendContainer.className = 'button-row';
     blendContainer.innerHTML = `
       <button id="blendToggle" class="control-button">BLEND</button>
       <button id="panToggle" class="control-button">PAN</button>
@@ -77,9 +88,7 @@ export function createUI(scene) {
     sliderContainer.appendChild(armLengthContainer);
 
     const randomContainer = document.createElement('div');
-    randomContainer.style.display = 'flex';
-    randomContainer.style.gap = '10px';
-    randomContainer.style.marginTop = '10px';
+    randomContainer.className = 'button-row';
     randomContainer.innerHTML = `
       <button id="randomButton" class="control-button">RANDOM</button>
       <button id="evolveButton" class="control-button">EVOLVE</button>
@@ -89,7 +98,7 @@ export function createUI(scene) {
     sliderContainer.appendChild(randomContainer);
 
     const resetContainer = document.createElement('div');
-    resetContainer.className = 'button-container';
+    resetContainer.className = 'button-row';
     resetContainer.innerHTML = `
       <button id="resetButton">RESET</button>
       <button id="pauseButton">PAUSE</button>
@@ -116,7 +125,7 @@ export function updateUI(scene, particleCount, bpm, masterVolume, harmonicEnable
   document.getElementById('speedValue').textContent = bpm;
   document.getElementById('speedSlider').value = scene.bpmToParticleSpeed(bpm);
   
-  document.getElementById('volumeValue').textContent = masterVolume.toFixed(1);
+  document.getElementById('volumeValue').textContent = Number(masterVolume).toFixed(2);
   document.getElementById('volumeSlider').value = masterVolume;
   
   document.getElementById('blendToggle').style.background = harmonicEnabled ? '#00cc00' : '#333';
@@ -156,7 +165,7 @@ export function handleUIEvents(scene) {
 
   document.getElementById('volumeSlider').addEventListener('input', (e) => {
     const volume = parseFloat(e.target.value);
-    document.getElementById('volumeValue').textContent = volume.toFixed(1);
+    document.getElementById('volumeValue').textContent = volume.toFixed(2);
     scene.masterVolume = volume;
   });
 
@@ -306,14 +315,11 @@ export function resetScene(scene) {
 }
 
 export function toggleMenu() {
-  const menu = document.getElementById('sliderContainer');
+  const collapsed = document.body.classList.toggle('sidebar-collapsed');
   const toggleButton = document.getElementById('toggleMenu');
-  
-  if (menu.style.display === 'none') {
-    menu.style.display = 'block';
-    toggleButton.textContent = 'HIDE MENU';
-  } else {
-    menu.style.display = 'none';
-    toggleButton.textContent = 'SHOW MENU';
+  if (toggleButton) {
+    toggleButton.textContent = collapsed ? 'SHOW MENU' : 'HIDE MENU';
   }
+  // Phaser FIT lyssnar på window resize när sidopanelen ändrar ytan.
+  window.dispatchEvent(new Event('resize'));
 }

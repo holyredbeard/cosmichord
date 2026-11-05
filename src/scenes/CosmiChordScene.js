@@ -72,19 +72,9 @@ class CosmiChordScene extends Phaser.Scene {
   }
 
   create() {
-    // Skapa logo
-    const logoImg = document.getElementById('logoImg');
-    if (!logoImg) {
-      const logo = document.createElement('img');
-      logo.id = 'logoImg';
-      logo.className = 'logo-img';
-      logo.src = '/images/logo.png';
-      logo.style.width = '180px';
-      document.body.appendChild(logo);
-    }
-
-    this.masterVolume = 0.3;
+    this.masterVolume = 0.65;
     this.audioContext = null;
+    this.audioUnlocked = false;
     this.shapes = [];
     this.connectionGraphics = this.add.graphics({ lineStyle: { width: 4 } });
     this.connectionGraphics.setDepth(0);
@@ -104,30 +94,10 @@ class CosmiChordScene extends Phaser.Scene {
     this.reverbNode = null;
     this.reverbBuffer = null;
 
-    // Lägg till en knapp för att initiera AudioContext och Magenta.js
-    const startButton = document.createElement('button');
-    startButton.textContent = 'Start Audio & AI';
-    startButton.className = 'control-button';
-    startButton.style.position = 'absolute';
-    startButton.style.top = '20px';
-    startButton.style.left = '50%';
-    startButton.style.transform = 'translateX(-50%)';
-    startButton.style.zIndex = '1000';
-    startButton.onclick = async () => {
-      if (!this.audioContext) {
-        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        console.log('AudioContext initialized via Start button');
-        this.initializeReverb();
-        
-        // Initiera Magenta.js efter att AudioContext är redo
-        await this.initializeMagenta();
-        
-        startButton.style.display = 'none';
-      } else if (this.audioContext.state === 'suspended') {
-        await this.audioContext.resume();
-      }
-    };
-    document.body.appendChild(startButton);
+    // Första klick/tap (var som helst) låser upp Web Audio, Phaser och Magentas Tone-kontext.
+    window.addEventListener('pointerdown', () => {
+      this.ensureAudio();
+    }, true);
 
     this.cameras.main.setBackgroundColor('#000000');
     this.gridSize = 60;
@@ -187,6 +157,10 @@ class CosmiChordScene extends Phaser.Scene {
       
       console.log('Creating UI elements...');
       createUI(this);
+      const startButton = document.getElementById('startAudioButton');
+      if (startButton) {
+        startButton.onclick = () => this.ensureAudio();
+      }
       handleUIEvents(this);
       console.log('UI elements created successfully');
     }, [], this);
@@ -196,6 +170,71 @@ class CosmiChordScene extends Phaser.Scene {
     this.bpm = 60;
     this.beatDuration = 60 / this.bpm;
     this.currentBeat = 0;
+  }
+
+  ensureAudio() {
+    if (this.audioContext && this.audioContext.state === 'running') {
+      this.markAudioReady();
+      return Promise.resolve(true);
+    }
+    if (!this._audioPromise) {
+      this._audioPromise = this._ensureAudioInner().finally(() => {
+        this._audioPromise = null;
+      });
+    }
+    return this._audioPromise;
+  }
+
+  async _ensureAudioInner() {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!this.audioContext || this.audioContext.state === 'closed') {
+      this.audioContext = new AudioCtx();
+      console.log('AudioContext initialized');
+      this.initializeReverb();
+      this.initializeMagenta();
+    }
+    const jobs = [];
+    if (this.audioContext.state !== 'running') {
+      jobs.push(this.audioContext.resume());
+    }
+    if (this.sound && this.sound.context && this.sound.context.state === 'suspended' && this.sound.context.resume) {
+      jobs.push(this.sound.context.resume());
+    }
+    if (this.sound && typeof this.sound.unlock === 'function') {
+      try { this.sound.unlock(); } catch (err) { /* Phaser kan redan vara upplåst */ }
+    }
+    this.resumeMagentaContext();
+    try {
+      await Promise.all(jobs);
+    } catch (err) {
+      console.warn('Audio resume failed', err);
+    }
+    const running = this.audioContext.state === 'running';
+    if (running) this.markAudioReady();
+    return running;
+  }
+
+  resumeMagentaContext() {
+    try {
+      if (typeof mm === 'undefined' || !mm.Player) return;
+      // Magenta/Tone skapar en egen AudioContext vid sidladdning (ofta suspended).
+      // resumeContext måste anropas från en användargest.
+      if (!this._magentaPlayer) this._magentaPlayer = new mm.Player();
+      const pending = this._magentaPlayer.resumeContext();
+      if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+    } catch (err) {
+      console.warn('Magenta audio resume failed', err);
+    }
+  }
+
+  markAudioReady() {
+    this.audioUnlocked = true;
+    const hint = document.getElementById('audioHint');
+    if (hint) {
+      hint.textContent = 'Audio on. Orbs play as soon as you place them, and get louder when particles pass.';
+    }
+    const startButton = document.getElementById('startAudioButton');
+    if (startButton) startButton.style.display = 'none';
   }
 
   async initializeMagenta() {
@@ -402,8 +441,14 @@ class CosmiChordScene extends Phaser.Scene {
         closestDistance = Math.min(closestDistance, distance);
       });
 
-      let volume = Math.max(0, Math.min(1, 1 - (closestDistance / shape.radius)));
-      volume = Math.pow(volume, 1.5) * 0.8;
+      const radius = shape.radius || this.nodeRadius || 100;
+      let proximity = 0;
+      if (isFinite(closestDistance) && radius > 0) {
+        proximity = Math.max(0, Math.min(1, 1 - (closestDistance / radius)));
+      }
+      proximity = Math.pow(proximity, 1.15);
+      // Vila-nivå så en placerad orb hörs direkt; partiklar sväller volymen.
+      let volume = (0.22 + 0.78 * proximity) * 0.9;
 
       if (!connections.size || !this.harmonicEnabled) {
         if (isFinite(shape.frequency) && this.audioContext && this.audioContext.state === 'running') {
@@ -443,10 +488,12 @@ class CosmiChordScene extends Phaser.Scene {
 
       if (this.audioContext && this.audioContext.state === 'running' && shape.gain && !this.isPaused) {
         const safeVolume = isFinite(shape.currentVolume) ? shape.currentVolume : 0;
-        const clampedVolume = Math.min(Math.max(safeVolume, 0), 1);
-        const volumeTransitionTime = Math.max(0.1, 0.3 * (1.5 / this.particleSpeed));
-        shape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
-        shape.gain.gain.setTargetAtTime(clampedVolume, this.audioContext.currentTime, volumeTransitionTime);
+        const clampedVolume = Math.min(Math.max(safeVolume, 0), 0.9);
+        // Avbryt inte automationen varje frame — det kan lämna gain fast nära 0.
+        if (Math.abs(shape.gain.gain.value - clampedVolume) > 0.02) {
+          const volumeTransitionTime = Math.max(0.05, 0.12 * (1.5 / this.particleSpeed));
+          shape.gain.gain.setTargetAtTime(clampedVolume, this.audioContext.currentTime, volumeTransitionTime);
+        }
 
         if (this.panEnabled && shape.stereoPanner) {
           const panValue = this.calculatePan(shape.i);
@@ -1026,21 +1073,6 @@ class CosmiChordScene extends Phaser.Scene {
     // Försök sätta upp UI-lyssnare efter en kort fördröjning
     setTimeout(setupUIListeners, 500);
 
-    this.input.on('pointerdown', (pointer) => {
-      if (!this.audioContext) {
-        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        console.log('AudioContext initialized');
-        this.initializeReverb();
-        
-        // Initiera Magenta.js efter att AudioContext är redo
-        this.initializeMagenta();
-      } else if (this.audioContext.state === 'suspended') {
-        this.audioContext.resume().then(() => {
-          console.log('AudioContext resumed');
-        });
-      }
-    });
-
     this.draggedShape = null;
     this.isDragging = false;
     this.selectedNoteType = null;
@@ -1446,17 +1478,10 @@ class CosmiChordScene extends Phaser.Scene {
     return 440 * Math.pow(2, (midi - 69) / 12);
   }
 
-  placeShape(pointer, type) {
+  async placeShape(pointer, type) {
     try {
-      if (!this.audioContext) {
-        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        console.log('AudioContext initialized on shape placement');
-        this.initializeReverb();
-      }
-  
-      if (this.audioContext.state === 'suspended') {
-        this.audioContext.resume();
-      }
+      await this.ensureAudio();
+      if (!this.audioContext) return null;
   
       // Enkel gränskollidkontroll
       if (

@@ -67,7 +67,7 @@ async function createConvolutionReverb(audioContext, impulseURL = '/audio/small-
   }
 }
 
-export function createOscillator(audioContext, frequency) {
+export function createOscillator(audioContext, frequency, oscType) {
   if (!audioContext) {
     console.error('AudioContext not initialized. Waiting for user interaction.');
     return null;
@@ -76,65 +76,85 @@ export function createOscillator(audioContext, frequency) {
   // Skapa huvudoscillator
   const oscillator = audioContext.createOscillator();
   
-  // Välj oscillatortyp baserat på frekvensen för varierande textur
-  if (frequency < 100) {
-    oscillator.type = 'sine'; // Ren, mjuk ton för bastoner
-  } else if (frequency < 220) {
-    oscillator.type = 'triangle'; // Lite rikare för mellanregister
-  } else {
-    oscillator.type = 'sine'; // Mjuk för högre toner
+  const freq = isFinite(frequency) && frequency > 0 ? frequency : 440;
+
+  // Rena sinustoner under ~150 Hz (Celestial börjar på 55 Hz) hörs knappt
+  // i laptop-högtalare. Sågtand plus en oktav över ger en tydlig ton.
+  let type = oscType;
+  if (!type) {
+    type = freq < 180 ? 'sawtooth' : freq < 360 ? 'triangle' : 'sine';
   }
-  
-  if (isFinite(frequency)) {
-    oscillator.frequency.setValueAtTime(frequency || 440, audioContext.currentTime);
-  } else {
-    oscillator.frequency.setValueAtTime(440, audioContext.currentTime);
-    console.error('Invalid frequency:', frequency);
-  }
-  
-  // Skapa filter för mjukare klang
+  if ((type === 'sine' || type === 'triangle') && freq < 150) type = 'sawtooth';
+  oscillator.type = type;
+
   const filter = audioContext.createBiquadFilter();
   filter.type = 'lowpass';
-  filter.frequency.value = 2000;
-  filter.Q.value = 0.5;
-  
-  // Skapa suboscillator för rikare ljud (oktav under)
-  const subOscillator = audioContext.createOscillator();
-  subOscillator.type = 'sine';
-  if (isFinite(frequency)) {
-    subOscillator.frequency.setValueAtTime(frequency / 2 || 220, audioContext.currentTime);
-  }
-  
-  // Gainnode för suboscillator
-  const subGain = audioContext.createGain();
-  subGain.gain.value = 0.15; // Lägre volym på suboscillatorn
-  
-  // Anslut oscillatorerna och filtret
-  oscillator.subOscillator = subOscillator; // Spara en referens
-  oscillator.filter = filter; // Spara en referens
-  subOscillator.connect(subGain);
-  
-  // Spara originalkopplingen för att kunna återgå till den
-  oscillator.connect = (function() {
-    const originalConnect = oscillator.connect.bind(oscillator);
-    return function(destination) {
-      originalConnect(filter);
-      filter.connect(destination);
-      subGain.connect(destination);
-      subOscillator.start();
-      return oscillator;
-    };
-  })();
-  
-  // Överskuggad stop-metod för att även stoppa suboscillatorn
-  const originalStop = oscillator.stop.bind(oscillator);
-  oscillator.stop = function(when) {
-    originalStop(when);
-    if (oscillator.subOscillator) {
-      oscillator.subOscillator.stop(when);
+  filter.frequency.value = freq < 180 ? 1400 : 2200;
+  filter.Q.value = 0.6;
+
+  const harmonic = audioContext.createOscillator();
+  harmonic.type = 'sine';
+  const harmonicGain = audioContext.createGain();
+  // Övertonen är tystare så två oscillatorer per nod inte summerar över 0 dB.
+  harmonicGain.gain.value = freq < 180 ? 0.22 : 0.12;
+  harmonic.frequency.value = freq * 2;
+  harmonic.connect(harmonicGain);
+
+  const freqParam = oscillator.frequency;
+  const origSetTarget = freqParam.setTargetAtTime.bind(freqParam);
+  const origSetValue = freqParam.setValueAtTime.bind(freqParam);
+  const trackHarmonic = (value, time, constant) => {
+    const harmFreq = Math.max(40, Number(value) * 2);
+    if (!isFinite(harmFreq)) return;
+    if (constant !== undefined) {
+      harmonic.frequency.setTargetAtTime(harmFreq, time, constant);
+    } else {
+      harmonic.frequency.setValueAtTime(harmFreq, time);
     }
   };
-  
+  freqParam.value = freq;
+  freqParam.setTargetAtTime = (value, time, constant) => {
+    const result = origSetTarget(value, time, constant);
+    trackHarmonic(value, time, constant);
+    return result;
+  };
+  freqParam.setValueAtTime = (value, time) => {
+    const result = origSetValue(value, time);
+    trackHarmonic(value, time);
+    return result;
+  };
+
+  oscillator.filter = filter;
+  oscillator.harmonic = harmonic;
+
+  let connected = false;
+  let started = false;
+  const originalConnect = oscillator.connect.bind(oscillator);
+  oscillator.connect = (destination) => {
+    if (!connected) {
+      originalConnect(filter);
+      connected = true;
+    }
+    try { filter.connect(destination); } catch (err) { /* redan ansluten */ }
+    try { harmonicGain.connect(destination); } catch (err) { /* redan ansluten */ }
+    return oscillator;
+  };
+
+  const originalStart = oscillator.start.bind(oscillator);
+  oscillator.start = (when) => {
+    if (started) return oscillator;
+    started = true;
+    originalStart(when);
+    try { harmonic.start(when); } catch (err) { /* redan startad */ }
+    return oscillator;
+  };
+
+  const originalStop = oscillator.stop.bind(oscillator);
+  oscillator.stop = (when) => {
+    try { originalStop(when); } catch (err) { /* redan stoppad */ }
+    try { harmonic.stop(when); } catch (err) { /* redan stoppad */ }
+  };
+
   return oscillator;
 }
 

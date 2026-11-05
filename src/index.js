@@ -19,6 +19,10 @@ document.addEventListener('DOMContentLoaded', () => {
     height: 800,
     backgroundColor: '#000000',
     parent: 'renderDiv',
+    scale: {
+      mode: Phaser.Scale.FIT,
+      autoCenter: Phaser.Scale.CENTER_BOTH
+    },
     physics: {
       default: 'matter',
       matter: {

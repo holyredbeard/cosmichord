@@ -6,33 +6,80 @@
       overflow: hidden;
       background-color: #000000;
     }
+    #app {
+      display: flex;
+      width: 100%;
+      height: 100%;
+      min-height: 100vh;
+    }
+    #sidebar {
+      box-sizing: border-box;
+      flex: 0 0 250px;
+      width: 250px;
+      height: 100%;
+      overflow-x: hidden;
+      overflow-y: auto;
+      background: #161616;
+      border-right: 1px solid #3a3a3a;
+      padding: 16px 14px 64px;
+      z-index: 2;
+      color: #fff;
+      font-family: Arial, sans-serif;
+    }
+    body.sidebar-collapsed #sidebar {
+      display: none;
+    }
     #renderDiv {
-      width: calc(100% - 250px);
-      height: 800px;
       position: relative;
-      left: 250px;
+      flex: 1 1 auto;
+      height: 100%;
+      min-width: 0;
+      overflow: hidden;
+      background: #000000;
     }
     .slider-container {
-      position: absolute;
-      top: 120px;
-      left: 20px;
-      background-color: rgba(0, 0, 0, 0.7);
-      padding: 15px;
-      border-radius: 5px;
-      z-index: 1000;
+      position: static;
+      width: 100%;
+      background: transparent;
+      padding: 0;
       color: white;
-      width: 220px;
-      transition: transform 0.3s ease-in-out;
       font-family: Arial, sans-serif;
     }
     .logo-img {
-      position: absolute;
-      top: 40px;
-      left: 40px;
+      display: block;
+      position: static;
       width: 180px;
+      max-width: 100%;
       height: auto;
-      z-index: 1000;
-      transition: transform 0.3s ease-in-out;
+      margin: 0 0 12px;
+    }
+    .audio-hint {
+      color: #d0d0d0;
+      font-size: 12px;
+      line-height: 1.35;
+      margin: 8px 0 12px;
+    }
+    #startAudioButton {
+      width: 100%;
+      margin: 0;
+    }
+    .mode-button.is-active {
+      background: #1d6b3a;
+    }
+    #aiModeButton.is-active {
+      background: #245c8a;
+    }
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 8px 0;
+    }
+    .button-row button {
+      flex: 1 1 calc(50% - 6px);
+      margin: 0;
+      min-width: 0;
+      box-sizing: border-box;
     }
     .slider-item {
       margin-bottom: 10px;
@@ -43,23 +90,24 @@
       align-items: center;
       margin-bottom: 10px;
     }
-    .button-container {
+    .button-container,
+    .button-row {
       display: flex;
-      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 6px;
       margin-top: 10px;
     }
     .toggle-menu {
-      position: absolute;
-      bottom: 20px;
-      left: 20px;
-      z-index: 1000;
+      position: fixed;
+      bottom: 12px;
+      left: 12px;
+      z-index: 1001;
       background-color: #333;
       color: white;
       border: none;
       padding: 5px 10px;
       border-radius: 3px;
       cursor: pointer;
-      transition: all 0.3s ease;
     }
     .control-button {
       background: #333;
@@ -84,8 +132,8 @@
       padding: 5px 10px;
       border-radius: 3px;
       cursor: pointer;
-      min-width: 60px;
+      min-width: 0;
     }
     button:hover {
       background-color: #555;
-    }</style><script defer="defer" src="main.182f10b053db2480df36.js"></script></head><body><div id="renderDiv"></div></body></html>
+    }</style><script defer="defer" src="main.db6e74d6f5d697cf9fdc.js"></script></head><body><div id="app"><aside id="sidebar"></aside><div id="renderDiv"></div></div></body></html>

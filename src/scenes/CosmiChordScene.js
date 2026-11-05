@@ -72,19 +72,13 @@ class CosmiChordScene extends Phaser.Scene {
   }
 
   create() {
-    // Skapa logo
-    const logoImg = document.getElementById('logoImg');
-    if (!logoImg) {
-      const logo = document.createElement('img');
-      logo.id = 'logoImg';
-      logo.className = 'logo-img';
-      logo.src = '/images/logo.png';
-      logo.style.width = '180px';
-      document.body.appendChild(logo);
-    }
-
-    this.masterVolume = 0.3;
+    this.masterVolume = 0.5;
+    this.maxSoundingVoices = 6;
+    // Summan av rösternas gain * osc-topp ska hålla sig under ~0.7 före master.
+    this.voicePeakBudget = 0.7;
+    this.oscPeak = 1.25;
     this.audioContext = null;
+    this.audioUnlocked = false;
     this.shapes = [];
     this.connectionGraphics = this.add.graphics({ lineStyle: { width: 4 } });
     this.connectionGraphics.setDepth(0);
@@ -94,6 +88,12 @@ class CosmiChordScene extends Phaser.Scene {
     this.panEnabled = false;
     this.harmonicEnabled = false;
     this.ambientModeActive = false;
+    this.playMode = 'manual';
+    this.aiLoopOn = false;
+    this.aiBusy = false;
+    this.aiChordStep = 0;
+    this.aiBeat = 0;
+    this.lifeLinks = [];
     this.isLive = false;
     this.isPaused = false;
     this.liveTimer = null;
@@ -104,30 +104,10 @@ class CosmiChordScene extends Phaser.Scene {
     this.reverbNode = null;
     this.reverbBuffer = null;
 
-    // Lägg till en knapp för att initiera AudioContext och Magenta.js
-    const startButton = document.createElement('button');
-    startButton.textContent = 'Start Audio & AI';
-    startButton.className = 'control-button';
-    startButton.style.position = 'absolute';
-    startButton.style.top = '20px';
-    startButton.style.left = '50%';
-    startButton.style.transform = 'translateX(-50%)';
-    startButton.style.zIndex = '1000';
-    startButton.onclick = async () => {
-      if (!this.audioContext) {
-        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        console.log('AudioContext initialized via Start button');
-        this.initializeReverb();
-        
-        // Initiera Magenta.js efter att AudioContext är redo
-        await this.initializeMagenta();
-        
-        startButton.style.display = 'none';
-      } else if (this.audioContext.state === 'suspended') {
-        await this.audioContext.resume();
-      }
-    };
-    document.body.appendChild(startButton);
+    // Första klick/tap (var som helst) låser upp Web Audio, Phaser och Magentas Tone-kontext.
+    window.addEventListener('pointerdown', () => {
+      this.ensureAudio();
+    }, true);
 
     this.cameras.main.setBackgroundColor('#000000');
     this.gridSize = 60;
@@ -187,6 +167,10 @@ class CosmiChordScene extends Phaser.Scene {
       
       console.log('Creating UI elements...');
       createUI(this);
+      const startButton = document.getElementById('startAudioButton');
+      if (startButton) {
+        startButton.onclick = () => this.ensureAudio();
+      }
       handleUIEvents(this);
       console.log('UI elements created successfully');
     }, [], this);
@@ -196,6 +180,142 @@ class CosmiChordScene extends Phaser.Scene {
     this.bpm = 60;
     this.beatDuration = 60 / this.bpm;
     this.currentBeat = 0;
+  }
+
+  ensureAudio() {
+    if (this.audioContext && this.audioContext.state === 'running') {
+      this.markAudioReady();
+      return Promise.resolve(true);
+    }
+    if (!this._audioPromise) {
+      this._audioPromise = this._ensureAudioInner().finally(() => {
+        this._audioPromise = null;
+      });
+    }
+    return this._audioPromise;
+  }
+
+  async _ensureAudioInner() {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!this.audioContext || this.audioContext.state === 'closed') {
+      this.audioContext = new AudioCtx();
+      console.log('AudioContext initialized');
+      this.installMasterBus();
+      this.initializeReverb();
+      this.initializeMagenta();
+    }
+    const jobs = [];
+    if (this.audioContext.state !== 'running') {
+      jobs.push(this.audioContext.resume());
+    }
+    if (this.sound && this.sound.context && this.sound.context.state === 'suspended' && this.sound.context.resume) {
+      jobs.push(this.sound.context.resume());
+    }
+    if (this.sound && typeof this.sound.unlock === 'function') {
+      try { this.sound.unlock(); } catch (err) { /* Phaser kan redan vara upplåst */ }
+    }
+    this.resumeMagentaContext();
+    try {
+      await Promise.all(jobs);
+    } catch (err) {
+      console.warn('Audio resume failed', err);
+    }
+    const running = this.audioContext.state === 'running';
+    if (running) this.markAudioReady();
+    return running;
+  }
+
+  installMasterBus() {
+    if (!this.audioContext || this.masterGain) return;
+    const ctx = this.audioContext;
+    this.masterGain = ctx.createGain();
+    this.masterGain.gain.value = Math.min(Math.max(this.masterVolume, 0), 1);
+
+    // Mjuk begränsare efter mastern. Vanliga nivåer passerar; toppar kläms före destination.
+    this.compressor = ctx.createDynamicsCompressor();
+    this.compressor.threshold.value = -8;
+    this.compressor.knee.value = 12;
+    this.compressor.ratio.value = 8;
+    this.compressor.attack.value = 0.005;
+    this.compressor.release.value = 0.22;
+
+    this.masterGain.connect(this.compressor);
+    this.compressor.connect(ctx.destination);
+  }
+
+  applyMasterVolume() {
+    if (!this.audioContext) return;
+    this.installMasterBus();
+    const level = Math.min(Math.max(this.masterVolume || 0, 0), 1);
+    this.masterGain.gain.setTargetAtTime(level, this.audioContext.currentTime, 0.05);
+  }
+
+  outputNode() {
+    this.installMasterBus();
+    return this.masterGain;
+  }
+
+  // LIVE / Magenta sätter en önskad styrka (0–1). Mixern skalar den inom budgeten.
+  requestAccent(shape, strength, duration) {
+    if (!shape) return;
+    const now = this.audioContext ? this.audioContext.currentTime : 0;
+    shape.accent = Math.min(Math.max(strength, 0), 1);
+    shape.accentUntil = now + Math.max(duration || 0.4, 0.05);
+  }
+
+  mixVoices() {
+    if (!this.audioContext || this.audioContext.state !== 'running') return;
+    this.installMasterBus();
+    const now = this.audioContext.currentTime;
+    const voices = this.shapes.filter(shape => shape && shape.gain);
+    if (!voices.length) return;
+
+    voices.forEach(shape => {
+      if (!shape.accentUntil || shape.accentUntil < now) shape.accent = 0;
+      const proximity = Math.min(Math.max(shape._proximityLevel || 0, 0), 1);
+      shape._desired = Math.min(1, Math.max(proximity, shape.accent || 0));
+    });
+
+    const ranked = voices.slice().sort((a, b) => b._desired - a._desired);
+    ranked.forEach((shape, index) => {
+      if (index >= this.maxSoundingVoices) shape._desired = 0;
+    });
+
+    const maxSumGain = this.voicePeakBudget / this.oscPeak;
+    const soloCap = Math.min(0.32, maxSumGain);
+    const sumDesired = voices.reduce((sum, shape) => sum + shape._desired, 0);
+    const unit = sumDesired > 0 ? Math.min(soloCap, maxSumGain / sumDesired) : 0;
+
+    voices.forEach(shape => {
+      const target = this.isPaused ? 0 : Math.min(soloCap, shape._desired * unit);
+      shape.currentVolume = target;
+      if (Math.abs(shape.gain.gain.value - target) > 0.015) {
+        shape.gain.gain.setTargetAtTime(target, now, this.isPaused ? 0.05 : 0.08);
+      }
+    });
+  }
+
+  resumeMagentaContext() {
+    try {
+      if (typeof mm === 'undefined' || !mm.Player) return;
+      // Magenta/Tone skapar en egen AudioContext vid sidladdning (ofta suspended).
+      // resumeContext måste anropas från en användargest.
+      if (!this._magentaPlayer) this._magentaPlayer = new mm.Player();
+      const pending = this._magentaPlayer.resumeContext();
+      if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+    } catch (err) {
+      console.warn('Magenta audio resume failed', err);
+    }
+  }
+
+  markAudioReady() {
+    this.audioUnlocked = true;
+    const hint = document.getElementById('audioHint');
+    if (hint) {
+      hint.textContent = 'Audio on. Orbs play as soon as you place them, and get louder when particles pass.';
+    }
+    const startButton = document.getElementById('startAudioButton');
+    if (startButton) startButton.style.display = 'none';
   }
 
   async initializeMagenta() {
@@ -391,6 +511,15 @@ class CosmiChordScene extends Phaser.Scene {
       }
     });
 
+    if (this.playMode === 'ai') {
+      this.collectLifeLinks();
+      this.drawLifeLinks();
+      this.advanceAiHarmony();
+    } else {
+      this.lifeLinks = [];
+      this.linkedShapes = null;
+    }
+
     // Uppdatera ljudparametrar
     this.shapes.forEach(shape => {
       const shapeKey = `${shape.i},${shape.j}`;
@@ -402,12 +531,30 @@ class CosmiChordScene extends Phaser.Scene {
         closestDistance = Math.min(closestDistance, distance);
       });
 
-      let volume = Math.max(0, Math.min(1, 1 - (closestDistance / shape.radius)));
-      volume = Math.pow(volume, 1.5) * 0.8;
+      const radius = shape.radius || this.nodeRadius || 100;
+      let proximity = 0;
+      if (isFinite(closestDistance) && radius > 0) {
+        proximity = Math.max(0, Math.min(1, 1 - (closestDistance / radius)));
+      }
+      proximity = Math.pow(proximity, 1.15);
+      // Relativ styrka 0–1. Mastern och röstbudgeten skalar den faktiska gainen.
+      let volume = 0.75 + 0.25 * proximity;
+      if (this.playMode === 'ai') {
+        const linked = this.linkedShapes && this.linkedShapes.has(shape);
+        volume = linked ? (0.82 + 0.18 * proximity) : 0.12;
+        if (shape.graphics) {
+          shape.graphics.setScale(linked ? 1 + 0.05 * Math.sin(this.time.now / 280 + shape.x) : 1);
+        }
+      } else if (shape.graphics && shape.graphics.scaleX !== 1) {
+        shape.graphics.setScale(1);
+      }
 
       if (!connections.size || !this.harmonicEnabled) {
-        if (isFinite(shape.frequency) && this.audioContext && this.audioContext.state === 'running') {
-          shape.oscillator.frequency.setTargetAtTime(shape.frequency, this.audioContext.currentTime, 0.1);
+        if (isFinite(shape.frequency) && shape.oscillator && this.audioContext && this.audioContext.state === 'running') {
+          if (shape._freqTarget !== shape.frequency) {
+            shape.oscillator.frequency.setTargetAtTime(shape.frequency, this.audioContext.currentTime, 0.08);
+            shape._freqTarget = shape.frequency;
+          }
         }
       } else if (this.harmonicEnabled) {
         const connectedShapes = Array.from(connections).map(key => {
@@ -426,35 +573,30 @@ class CosmiChordScene extends Phaser.Scene {
             const rootFrequency = Math.min(baseFreq, ...connectedFreqs);
             
             // Välj en harmonisk ton
-            const interval = harmonicIntervals[Math.floor(Math.random() * harmonicIntervals.length)];
+            const interval = harmonicIntervals[connections.size % harmonicIntervals.length];
             const targetFreq = rootFrequency * interval;
-            
-            // Mjuk övergång till den harmoniska tonen
-            shape.oscillator.frequency.setTargetAtTime(targetFreq, this.audioContext.currentTime, 2.0);
-            
+            if (shape.oscillator && shape._freqTarget !== targetFreq) {
+              shape.oscillator.frequency.setTargetAtTime(targetFreq, this.audioContext.currentTime, 0.4);
+              shape._freqTarget = targetFreq;
+            }
             volume *= 0.9;
           }
         }
       }
 
       shape.baseVolume = volume;
-      const frequencyBoost = (shape.frequency <= 110) ? 1.2 : (shape.frequency <= 220 ? 1.1 : 1);
-      shape.currentVolume = shape.baseVolume * this.masterVolume * frequencyBoost;
+      shape._proximityLevel = Math.min(Math.max(volume, 0), 1);
 
-      if (this.audioContext && this.audioContext.state === 'running' && shape.gain && !this.isPaused) {
-        const safeVolume = isFinite(shape.currentVolume) ? shape.currentVolume : 0;
-        const clampedVolume = Math.min(Math.max(safeVolume, 0), 1);
-        const volumeTransitionTime = Math.max(0.1, 0.3 * (1.5 / this.particleSpeed));
-        shape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
-        shape.gain.gain.setTargetAtTime(clampedVolume, this.audioContext.currentTime, volumeTransitionTime);
-
-        if (this.panEnabled && shape.stereoPanner) {
-          const panValue = this.calculatePan(shape.i);
-          shape.stereoPanner.pan.cancelScheduledValues(this.audioContext.currentTime);
-          shape.stereoPanner.pan.setTargetAtTime(panValue, this.audioContext.currentTime, 0.05);
+      if (this.panEnabled && shape.stereoPanner && this.audioContext && this.audioContext.state === 'running') {
+        const panValue = this.calculatePan(shape.i);
+        if (shape._panTarget !== panValue) {
+          shape.stereoPanner.pan.setTargetAtTime(panValue, this.audioContext.currentTime, 0.08);
+          shape._panTarget = panValue;
         }
       }
     });
+
+    this.mixVoices();
     
     // Uppdatera beat för timing
     this.currentBeat = Math.floor(this.time.now / 1000 / this.beatDuration) % 4;
@@ -511,9 +653,9 @@ class CosmiChordScene extends Phaser.Scene {
       shape.gain = this.audioContext.createGain();
       shape.gain.gain.value = 0; // Börja tyst
       
-      // Anslut oscillator -> gain -> destination
+      // Oscillator -> röst-gain -> master -> kompressor -> destination
       shape.oscillator.connect(shape.gain);
-      shape.gain.connect(this.audioContext.destination);
+      shape.gain.connect(this.outputNode());
       
       // Starta oscillatorn
       shape.oscillator.start();
@@ -556,7 +698,7 @@ class CosmiChordScene extends Phaser.Scene {
       }
       
       convolver.buffer = buffer;
-      convolver.connect(this.audioContext.destination);
+      convolver.connect(this.outputNode());
       this.reverbNode = convolver;
       
       console.log('Improved reverb initialized');
@@ -741,7 +883,9 @@ class CosmiChordScene extends Phaser.Scene {
       if (!oscillator) return;
       const gain = this.audioContext.createGain();
       const stereoPanner = this.audioContext.createStereoPanner();
-      oscillator.connect(gain).connect(stereoPanner).connect(this.audioContext.destination);
+      oscillator.connect(gain);
+      gain.connect(stereoPanner);
+      stereoPanner.connect(this.outputNode());
       oscillator.start();
       stereoPanner.pan.setValueAtTime(this.panEnabled ? this.calculatePan(shapeData.i) : 0, this.audioContext.currentTime);
       gain.gain.setTargetAtTime(0.01 * (frequency <= 110 ? 1.5 : 1), this.audioContext.currentTime + 0.01, 0.1);
@@ -816,11 +960,6 @@ class CosmiChordScene extends Phaser.Scene {
     }
 
     console.log('Received control sequence from AI Worker:', sequence);
-    this.shapes.forEach(shape => {
-      if (shape.gain) {
-        shape.gain.gain.cancelScheduledValues(this.audioContext.currentTime).setValueAtTime(0, this.audioContext.currentTime);
-      }
-    });
 
     sequence.forEach(event => {
       console.log('Processing event:', event);
@@ -884,12 +1023,12 @@ class CosmiChordScene extends Phaser.Scene {
           }
         }
 
-        // Volym
-        const volumeBoost = event.frequency <= 110 ? 1.5 : 1;
-        const targetVolume = this.masterVolume * volumeBoost * (shape.visible ? 1 : 0);
-        shape.gain.gain.cancelScheduledValues(this.audioContext.currentTime).setValueAtTime(0, this.audioContext.currentTime);
-        shape.gain.gain.linearRampToValueAtTime(targetVolume, this.audioContext.currentTime + (event.duration || 1));
-        shape.gain.gain.linearRampToValueAtTime(0, this.audioContext.currentTime + (event.duration || 1) + 0.5);
+        // Volym går via röstbudgeten, inte rakt till destination.
+        if (shape.visible === false) {
+          this.requestAccent(shape, 0, 0.05);
+        } else {
+          this.requestAccent(shape, 0.85, event.duration || 1);
+        }
 
         // Pan (om aktiverat)
         if (this.panEnabled && shape.stereoPanner) {
@@ -990,56 +1129,36 @@ class CosmiChordScene extends Phaser.Scene {
         });
       }
 
+      const manualModeButton = document.getElementById('manualModeButton');
+      if (manualModeButton) {
+        manualModeButton.addEventListener('click', () => this.setPlayMode('manual'));
+      }
+      const aiModeButton = document.getElementById('aiModeButton');
+      if (aiModeButton) {
+        aiModeButton.addEventListener('click', () => this.setPlayMode('ai'));
+      }
+
       // EVOLVE-knapp
       const evolveButton = document.getElementById('evolveButton');
       if (evolveButton) {
-        evolveButton.addEventListener('click', () => {
-          if (!this.audioContext || this.audioContext.state !== 'running') {
-            console.warn('AudioContext not ready');
-            return;
-          }
-          if (!this.magentaLoaded || !this.modelsLoaded) {
-            console.warn('Magenta.js not ready');
-            return;
-          }
-          this.startEvolutionProcess();
+        evolveButton.addEventListener('click', async () => {
+          await this.ensureAudio();
+          this.continueFromConnections({ temperature: 0.5, steps: 16 });
         });
       }
 
       // AI AMBIENT-knapp
       const aiAmbientButton = document.getElementById('aiAmbientButton');
       if (aiAmbientButton) {
-        aiAmbientButton.addEventListener('click', () => {
-          if (!this.audioContext || this.audioContext.state !== 'running') {
-            console.warn('AudioContext not ready');
-            return;
-          }
-          if (!this.magentaLoaded || !this.modelsLoaded) {
-            console.warn('Magenta.js not ready');
-            return;
-          }
-          this.startAmbientGeneration();
+        aiAmbientButton.addEventListener('click', async () => {
+          await this.ensureAudio();
+          this.continueFromConnections({ temperature: 0.25, steps: 24, noteHold: 1.8 });
         });
       }
     };
 
     // Försök sätta upp UI-lyssnare efter en kort fördröjning
     setTimeout(setupUIListeners, 500);
-
-    this.input.on('pointerdown', (pointer) => {
-      if (!this.audioContext) {
-        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        console.log('AudioContext initialized');
-        this.initializeReverb();
-        
-        // Initiera Magenta.js efter att AudioContext är redo
-        this.initializeMagenta();
-      } else if (this.audioContext.state === 'suspended') {
-        this.audioContext.resume().then(() => {
-          console.log('AudioContext resumed');
-        });
-      }
-    });
 
     this.draggedShape = null;
     this.isDragging = false;
@@ -1265,14 +1384,6 @@ class CosmiChordScene extends Phaser.Scene {
         this.draggedShape.j = clampedJ;
 
         if (this.draggedShape.gain) {
-          this.draggedShape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
-          this.draggedShape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.01);
-          this.draggedShape.gain.gain.setTargetAtTime(
-            this.draggedShape.baseVolume * this.masterVolume * (this.draggedShape.frequency <= 110 ? 1.5 : 1),
-            this.audioContext.currentTime + 0.01,
-            0.05
-          );
-
           if (this.panEnabled && this.draggedShape.stereoPanner) {
             const panValue = this.calculatePan(clampedI);
             this.draggedShape.stereoPanner.pan.cancelScheduledValues(this.audioContext.currentTime);
@@ -1316,128 +1427,345 @@ class CosmiChordScene extends Phaser.Scene {
     });
   }
 
-  startEvolutionProcess() {
-    if (!this.audioContext || this.audioContext.state !== 'running') {
-      console.warn('AudioContext not ready');
-      return;
-    }
-
-    if (!this.magentaLoaded || !this.modelsLoaded) {
-      console.warn('Magenta.js not ready');
-      return;
-    }
-
-    if (this.shapes.length === 0) {
-      console.warn('No shapes to evolve');
-      return;
-    }
-
-    const shapesData = this.shapes.map(shape => ({
-      type: shape.type,
-      frequency: shape.frequency,
-      position: { x: shape.x, y: shape.y }
-    }));
-
-    this.generateEvolution(shapesData);
+  // LIVE brukade anropa en metod som inte fanns (och en äldre variant läste this.Stat).
+  // Knappen växlar nu samma AI-slinga som läget, utan slumpmässiga gain-pulser.
+  toggleLiveMode() {
+    const rnnReady = !!this.music_rnn;
+    console.log('LIVE toggle, MusicRNN ready:', rnnReady);
+    this.setPlayMode(this.playMode === 'ai' ? 'manual' : 'ai');
   }
 
-  async generateEvolution(shapesData) {
-    try {
-      // Generera en sekvens med MusicRNN
-      const seed = {
-        notes: shapesData.map(shape => ({
-          pitch: this.frequencyToMidi(shape.frequency),
-          startTime: 0,
-          endTime: 1
-        })),
-        totalTime: 4
-      };
-
-      const result = await this.music_rnn.continueSequence(seed, {
-        temperature: 0.8,
-        steps: 32
-      });
-
-      // Konvertera sekvensen till ljud
-      this.playSoundscape(result.notes);
-    } catch (error) {
-      console.error('Error generating evolution:', error);
+  setPlayMode(mode) {
+    const next = mode === 'ai' ? 'ai' : 'manual';
+    if (next === 'ai') this.ensureAudio();
+    this.playMode = next;
+    this.isLive = next === 'ai';
+    const manualBtn = document.getElementById('manualModeButton');
+    const aiBtn = document.getElementById('aiModeButton');
+    const liveBtn = document.getElementById('liveButton');
+    if (manualBtn) manualBtn.classList.toggle('is-active', next === 'manual');
+    if (aiBtn) aiBtn.classList.toggle('is-active', next === 'ai');
+    if (liveBtn) liveBtn.style.background = next === 'ai' ? '#245c8a' : '';
+    if (next === 'manual') {
+      this.stopAiLoop();
+      this.restoreHomePitches();
+      this.setModeStatus('Manual. Place orbs and shape the sound yourself.');
+    } else {
+      this.setModeStatus('AI. Waiting for orbs to connect.');
+      this.startAiLoop();
     }
+  }
+
+  setModeStatus(text) {
+    const el = document.getElementById('modeStatus');
+    if (el && el.textContent !== text) el.textContent = text;
+  }
+
+  stopAiLoop() {
+    this.aiLoopOn = false;
+    if (this.aiTimer) {
+      this.aiTimer.remove();
+      this.aiTimer = null;
+    }
+  }
+
+  startAiLoop() {
+    this.aiLoopOn = true;
+    this.scheduleAiPhrase(0.6);
+  }
+
+  scheduleAiPhrase(seconds) {
+    if (!this.aiLoopOn) return;
+    if (this.aiTimer) this.aiTimer.remove();
+    this.aiTimer = this.time.delayedCall(Math.max(seconds, 0.3) * 1000, () => {
+      this.runAiPhrase();
+    });
+  }
+
+  async runAiPhrase() {
+    if (!this.aiLoopOn || this.aiBusy) return;
+    this.aiBusy = true;
+    try {
+      const grown = !!this._linkGrew;
+      this._linkGrew = false;
+      const seconds = await this.continueFromConnections({
+        temperature: grown ? 0.5 : 0.3,
+        steps: 16
+      });
+      if (this.aiLoopOn) this.scheduleAiPhrase(seconds || 3);
+    } finally {
+      this.aiBusy = false;
+    }
+  }
+
+  collectLifeLinks() {
+    const links = [];
+    const linked = new Set();
+    const shapes = this.shapes || [];
+    for (let i = 0; i < shapes.length; i++) {
+      for (let j = i + 1; j < shapes.length; j++) {
+        const a = shapes[i];
+        const b = shapes[j];
+        const dist = Phaser.Math.Distance.Between(a.x, a.y, b.x, b.y);
+        const reach = Math.max(a.radius || this.nodeRadius || 100, b.radius || this.nodeRadius || 100) * 1.25;
+        if (dist < reach) {
+          links.push({ a, b });
+          linked.add(a);
+          linked.add(b);
+        }
+      }
+    }
+    if (this._prevLinkCount !== links.length) {
+      if (this._prevLinkCount != null && links.length > this._prevLinkCount) this._linkGrew = true;
+      if (this._prevLinkCount != null) this.aiChordStep = (this.aiChordStep || 0) + 1;
+      this._prevLinkCount = links.length;
+    }
+    this.lifeLinks = links;
+    this.linkedShapes = linked;
+    return links;
+  }
+
+  drawLifeLinks() {
+    if (!this.connectionGraphics || !this.lifeLinks) return;
+    const time = this.time.now / 1000;
+    this.lifeLinks.forEach((link, index) => {
+      const { a, b } = link;
+      const colorA = this.getShapeColor(a.type, activeTheme);
+      const colorB = this.getShapeColor(b.type, activeTheme);
+      const color = this.mixColors(colorA, colorB);
+      const pulse = 0.35 + 0.3 * (0.5 + 0.5 * Math.sin(time * 2 + index));
+      this.connectionGraphics.lineStyle(2 + pulse * 2, color, pulse);
+      this.connectionGraphics.beginPath();
+      this.connectionGraphics.moveTo(a.x, a.y);
+      const steps = 8;
+      for (let s = 1; s <= steps; s++) {
+        const t = s / steps;
+        const lift = Math.sin(Math.PI * t) * (18 + 8 * Math.sin(time * 1.4 + index));
+        const x = a.x + (b.x - a.x) * t;
+        const y = a.y + (b.y - a.y) * t - lift;
+        this.connectionGraphics.lineTo(x, y);
+      }
+      this.connectionGraphics.strokePath();
+    });
+  }
+
+  mixColors(a, b) {
+    const mix = (shift) => {
+      const ca = (a >> shift) & 255;
+      const cb = (b >> shift) & 255;
+      return (ca + cb) >> 1;
+    };
+    return (mix(16) << 16) | (mix(8) << 8) | mix(0);
+  }
+
+  orderedVoices() {
+    if (!this.linkedShapes) return [];
+    return Array.from(this.linkedShapes).sort((a, b) => a.x - b.x || a.y - b.y);
+  }
+
+  scalePitchClasses() {
+    const chord = this.chordColors[this.selectedChord] || this.chordColors[0];
+    const pcs = chord.frequencies.map(freq => ((this.frequencyToMidi(freq) % 12) + 12) % 12);
+    return [...new Set(pcs)].sort((a, b) => a - b);
+  }
+
+  currentChordClasses() {
+    const pcs = this.scalePitchClasses();
+    if (!pcs.length) return [0, 4, 7];
+    const richness = Math.min(pcs.length, 3 + Math.floor((this.lifeLinks ? this.lifeLinks.length : 0) / 3));
+    const offsets = [0, 2, 4, 6].slice(0, Math.max(3, richness));
+    const root = (this.aiChordStep || 0) % pcs.length;
+    return offsets.map(offset => pcs[(root + offset) % pcs.length]);
+  }
+
+  pitchName(pc) {
+    return ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'][((pc % 12) + 12) % 12];
+  }
+
+  advanceAiHarmony() {
+    if (!this.audioContext || this.audioContext.state !== 'running') return;
+    const voices = this.orderedVoices();
+    if (voices.length < 2) {
+      this.setModeStatus('AI. Move orbs within arm’s reach so a harmony can form.');
+      return;
+    }
+    const chord = this.currentChordClasses();
+    const signature = voices.map(voice => `${voice.i},${voice.j}`).join('|') + ':' + chord.join(',');
+    if (signature !== this._voiceSig) {
+      this._voiceSig = signature;
+      this.assignVoices(voices, chord);
+    }
+    const now = this.audioContext.currentTime;
+    const bpm = Math.max(40, this.particleSpeedToBPM(this.particleSpeed));
+    const beat = 60 / bpm;
+    if (!this._nextAiBeat || now >= this._nextAiBeat) {
+      this._nextAiBeat = now + beat;
+      this.aiBeat = (this.aiBeat || 0) + 1;
+      const lead = voices[this.aiBeat % voices.length];
+      this.requestAccent(lead, 0.95, beat * 0.95);
+      if (this.aiBeat % 4 === 0) {
+        voices.forEach(voice => this.requestAccent(voice, 0.75, beat * 1.8));
+      }
+      const label = (this.chordColors[this.selectedChord] || {}).label || 'Chord';
+      const names = chord.map(pc => this.pitchName(pc)).join(' ');
+      const links = this.lifeLinks.length;
+      this.setModeStatus(`AI. ${label} · ${names} · ${links} link${links === 1 ? '' : 's'}`);
+    }
+  }
+
+  assignVoices(voices, pitchClasses) {
+    const used = new Set();
+    voices.forEach(shape => {
+      const midi = shape.aiMidi || this.frequencyToMidi(shape.frequency || shape.homeFrequency || 220);
+      let best = midi;
+      let bestScore = Infinity;
+      for (let octave = 3; octave <= 6; octave++) {
+        pitchClasses.forEach(pc => {
+          const candidate = octave * 12 + pc;
+          const score = Math.abs(candidate - midi) + (used.has(candidate) ? 7 : 0);
+          if (score < bestScore) {
+            bestScore = score;
+            best = candidate;
+          }
+        });
+      }
+      used.add(best);
+      this.retuneShape(shape, best, 0);
+    });
+  }
+
+  retuneShape(shape, midi, delay = 0) {
+    if (!shape) return;
+    const freq = this.midiToFrequency(midi);
+    shape.aiMidi = midi;
+    shape.frequency = freq;
+    shape._freqTarget = freq;
+    if (shape.oscillator && this.audioContext) {
+      shape.oscillator.frequency.setTargetAtTime(freq, this.audioContext.currentTime + delay, 0.12);
+    }
+  }
+
+  restoreHomePitches() {
+    this.shapes.forEach(shape => {
+      shape.accent = 0;
+      if (!shape.homeFrequency) return;
+      shape.frequency = shape.homeFrequency;
+      shape._freqTarget = shape.homeFrequency;
+      shape.aiMidi = this.frequencyToMidi(shape.homeFrequency);
+      if (shape.oscillator && this.audioContext) {
+        shape.oscillator.frequency.setTargetAtTime(shape.homeFrequency, this.audioContext.currentTime, 0.15);
+      }
+    });
+  }
+
+  snapPitch(midi, pitchClasses) {
+    const pc = ((midi % 12) + 12) % 12;
+    let best = pitchClasses[0];
+    let distance = 99;
+    pitchClasses.forEach(candidate => {
+      const gap = Math.min((pc - candidate + 12) % 12, (candidate - pc + 12) % 12);
+      if (gap < distance) {
+        distance = gap;
+        best = candidate;
+      }
+    });
+    let snapped = Math.round(midi / 12) * 12 + best;
+    if (snapped - midi > 6) snapped -= 12;
+    if (midi - snapped > 6) snapped += 12;
+    return Math.max(48, Math.min(84, snapped));
+  }
+
+  noteTime(note, bpm) {
+    if (typeof note.startTime === 'number') return note.startTime;
+    const step = note.quantizedStartStep || 0;
+    return (step / 4) * (60 / bpm);
+  }
+
+  async continueFromConnections({ temperature = 0.4, steps = 16, noteHold = 1 } = {}) {
+    await this.ensureAudio();
+    if (!this.lifeLinks || !this.lifeLinks.length) this.collectLifeLinks();
+    const voices = this.orderedVoices();
+    const chord = this.currentChordClasses();
+    if (voices.length < 2) {
+      this.setModeStatus('AI needs a connection. Bring two orbs within arm’s reach.');
+      return 2.5;
+    }
+    this.assignVoices(voices, chord);
+    const bpm = Math.max(40, this.particleSpeedToBPM(this.particleSpeed));
+    let notes = null;
+    if (this.magentaLoaded && this.modelsLoaded && this.music_rnn && typeof mm !== 'undefined') {
+      try {
+        const seedNotes = voices.slice(0, 8).map((shape, index) => ({
+          pitch: shape.aiMidi,
+          startTime: index * 0.5,
+          endTime: index * 0.5 + 0.45
+        }));
+        const seed = {
+          notes: seedNotes,
+          totalTime: seedNotes.length * 0.5,
+          tempos: [{ time: 0, qpm: bpm }]
+        };
+        const quantized = mm.sequences.quantizeNoteSequence(seed, 4);
+        const continued = await this.music_rnn.continueSequence(quantized, steps, temperature);
+        notes = (continued && continued.notes ? continued.notes : []).map(note => ({
+          ...note,
+          pitch: this.snapPitch(note.pitch, chord)
+        }));
+      } catch (error) {
+        console.warn('Magenta continuation failed, holding the connected chord', error);
+      }
+    }
+    if (!notes || !notes.length) {
+      notes = voices.map((shape, index) => ({
+        pitch: shape.aiMidi,
+        startTime: index * 0.5,
+        endTime: index * 0.5 + 0.9
+      }));
+    }
+    const stretched = notes.map(note => {
+      const start = this.noteTime(note, bpm);
+      const end = typeof note.endTime === 'number'
+        ? note.endTime
+        : start + ((note.quantizedEndStep || 1) - (note.quantizedStartStep || 0)) / 4 * (60 / bpm);
+      return {
+        ...note,
+        startTime: start * noteHold,
+        endTime: Math.max(end, start + 0.3) * noteHold
+      };
+    });
+    this.playSoundscape(stretched, voices);
+    const last = stretched[stretched.length - 1];
+    const label = (this.chordColors[this.selectedChord] || {}).label || 'Chord';
+    this.setModeStatus(`AI. ${label} · ${chord.map(pc => this.pitchName(pc)).join(' ')} · melody across ${voices.length} linked orbs`);
+    return (last ? last.endTime : 2) + 0.4;
+  }
+
+  startEvolutionProcess() {
+    this.continueFromConnections({ temperature: 0.5, steps: 16 });
   }
 
   startAmbientGeneration() {
+    this.continueFromConnections({ temperature: 0.25, steps: 24, noteHold: 1.8 });
+  }
+
+  playSoundscape(sequence, voices) {
     if (!this.audioContext || this.audioContext.state !== 'running') {
       console.warn('AudioContext not ready');
       return;
     }
 
-    if (!this.magentaLoaded || !this.modelsLoaded) {
-      console.warn('Magenta.js not ready');
-      return;
-    }
-
-    if (this.shapes.length === 0) {
-      console.warn('No shapes to generate ambient from');
-      return;
-    }
-
-    const shapesData = this.shapes.map(shape => ({
-      type: shape.type,
-      frequency: shape.frequency,
-      position: { x: shape.x, y: shape.y }
-    }));
-
-    this.generateAmbient(shapesData);
-  }
-
-  async generateAmbient(shapesData) {
-    try {
-      // Generera ambient med MusicRNN
-      const seed = {
-        notes: shapesData.map(shape => ({
-          pitch: this.frequencyToMidi(shape.frequency),
-          startTime: 0,
-          endTime: 2
-        })),
-        totalTime: 4
-      };
-
-      const result = await this.music_rnn.continueSequence(seed, {
-        temperature: 0.2,  // Lägre temperatur för mer förutsägbart resultat
-        steps: 64         // Fler steg för längre sekvens
-      });
-
-      // Konvertera sekvensen till ljud med längre toner för ambient-känsla
-      const ambientNotes = result.notes.map(note => ({
-        ...note,
-        endTime: note.endTime * 2,  // Dubbla längden på tonerna
-        startTime: note.startTime * 2
-      }));
-
-      this.playSoundscape(ambientNotes);
-    } catch (error) {
-      console.error('Error generating ambient:', error);
-    }
-  }
-
-  playSoundscape(sequence) {
-    if (!this.audioContext || this.audioContext.state !== 'running') {
-      console.warn('AudioContext not ready');
-      return;
-    }
-
-    sequence.forEach(note => {
-      const shape = this.shapes[Math.floor(Math.random() * this.shapes.length)];
+    const roster = voices && voices.length ? voices : this.shapes;
+    if (!roster.length || !sequence || !sequence.length) return;
+    sequence.forEach((note, index) => {
+      const shape = roster[index % roster.length];
       if (shape && shape.oscillator) {
         const frequency = this.midiToFrequency(note.pitch);
-        shape.oscillator.frequency.setTargetAtTime(frequency, this.audioContext.currentTime + note.startTime, 0.1);
-        
-        const duration = note.endTime - note.startTime;
-        const volume = 0.3 * this.masterVolume;
-        
-        shape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
-        shape.gain.gain.setTargetAtTime(volume, this.audioContext.currentTime + note.startTime, 0.1);
-        shape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime + note.endTime, 0.1);
+        const when = this.audioContext.currentTime + (note.startTime || 0);
+        shape.frequency = frequency;
+        shape._freqTarget = frequency;
+        shape.oscillator.frequency.setTargetAtTime(frequency, when, 0.08);
+        const duration = Math.max((note.endTime || 1) - (note.startTime || 0), 0.2);
+        this.requestAccent(shape, 0.8, (note.startTime || 0) + duration);
       }
     });
   }
@@ -1446,17 +1774,10 @@ class CosmiChordScene extends Phaser.Scene {
     return 440 * Math.pow(2, (midi - 69) / 12);
   }
 
-  placeShape(pointer, type) {
+  async placeShape(pointer, type) {
     try {
-      if (!this.audioContext) {
-        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        console.log('AudioContext initialized on shape placement');
-        this.initializeReverb();
-      }
-  
-      if (this.audioContext.state === 'suspended') {
-        this.audioContext.resume();
-      }
+      await this.ensureAudio();
+      if (!this.audioContext) return null;
   
       // Enkel gränskollidkontroll
       if (
@@ -1502,6 +1823,7 @@ class CosmiChordScene extends Phaser.Scene {
       }
   
       this.setupShapeAudio(shape, frequency);
+      shape.homeFrequency = frequency;
   
       // Enkel grafik
       shape.graphics = this.add.graphics();

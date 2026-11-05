@@ -512,9 +512,10 @@ class CosmiChordScene extends Phaser.Scene {
     });
 
     if (this.playMode === 'ai') {
+      this.stepAiLife();
       this.collectLifeLinks();
       this.drawLifeLinks();
-      this.advanceAiHarmony();
+      this.tickAiSong();
     } else {
       this.lifeLinks = [];
       this.linkedShapes = null;
@@ -541,7 +542,8 @@ class CosmiChordScene extends Phaser.Scene {
       let volume = 0.75 + 0.25 * proximity;
       if (this.playMode === 'ai') {
         const linked = this.linkedShapes && this.linkedShapes.has(shape);
-        volume = linked ? (0.82 + 0.18 * proximity) : 0.12;
+        if (shape.aiOwned) volume = shape.aiLead ? 0.95 : (linked ? 0.8 : 0.4);
+        else volume = linked ? 0.55 : 0.12;
         if (shape.graphics) {
           shape.graphics.setScale(linked ? 1 + 0.05 * Math.sin(this.time.now / 280 + shape.x) : 1);
         }
@@ -1143,7 +1145,8 @@ class CosmiChordScene extends Phaser.Scene {
       if (evolveButton) {
         evolveButton.addEventListener('click', async () => {
           await this.ensureAudio();
-          this.continueFromConnections({ temperature: 0.5, steps: 16 });
+          if (this.playMode === 'ai') this.advanceFormation();
+          else this.continueFromConnections({ temperature: 0.5, steps: 16 });
         });
       }
 
@@ -1152,7 +1155,8 @@ class CosmiChordScene extends Phaser.Scene {
       if (aiAmbientButton) {
         aiAmbientButton.addEventListener('click', async () => {
           await this.ensureAudio();
-          this.continueFromConnections({ temperature: 0.25, steps: 24, noteHold: 1.8 });
+          if (this.playMode === 'ai') this.beginFormation(2);
+          else this.continueFromConnections({ temperature: 0.25, steps: 24, noteHold: 1.8 });
         });
       }
     };
@@ -1447,11 +1451,17 @@ class CosmiChordScene extends Phaser.Scene {
     if (aiBtn) aiBtn.classList.toggle('is-active', next === 'ai');
     if (liveBtn) liveBtn.style.background = next === 'ai' ? '#245c8a' : '';
     if (next === 'manual') {
+      this.aiFormation = null;
+      this.aiFormationIndex = 0;
       this.stopAiLoop();
+      this.shapes.filter(shape => shape.aiOwned).forEach(shape => this.removeShape(shape));
       this.restoreHomePitches();
       this.setModeStatus('Manual. Place orbs and shape the sound yourself.');
     } else {
-      this.setModeStatus('AI. Waiting for orbs to connect.');
+      this.setModeStatus('AI is alive. It will gather nodes and grow a piece.');
+      this.aiFormation = null;
+      this.aiFormationIndex = 0;
+      this.songBeat = -1;
       this.startAiLoop();
     }
   }
@@ -1471,7 +1481,250 @@ class CosmiChordScene extends Phaser.Scene {
 
   startAiLoop() {
     this.aiLoopOn = true;
-    this.scheduleAiPhrase(0.6);
+    if (!this.aiFormation) this.beginFormation(0);
+  }
+
+  aiNodes() {
+    return (this.shapes || []).filter(shape => shape.aiOwned && !shape.retiring);
+  }
+
+  beginFormation(index) {
+    const kinds = ['converge', 'cluster', 'orbit', 'release'];
+    const kind = kinds[((index % kinds.length) + kinds.length) % kinds.length];
+    const centers = [
+      { x: 340, y: 320 },
+      { x: 540, y: 400 },
+      { x: 400, y: 560 },
+      { x: 480, y: 260 }
+    ];
+    this.aiFormationIndex = index;
+    this.aiFormation = {
+      kind,
+      index,
+      started: this.time.now,
+      duration: kind === 'release' ? 5200 : kind === 'orbit' ? 8400 : 7000,
+      center: centers[index % centers.length],
+      phrase: index % 2 === 0 ? 'call' : 'answer'
+    };
+    this.songBeat = -1;
+    this._nextSongBeat = 0;
+    if (this._pendingContour && this._pendingContour.length >= 4) {
+      this._activeContour = this._pendingContour;
+      this._pendingContour = null;
+    } else if (index % 2 === 0) {
+      this._activeContour = null;
+    }
+    const population = kind === 'converge' ? 2 : 4;
+    this.ensureAiPopulation(population, kind === 'converge');
+    const names = { converge: 'converging pair', cluster: 'cluster', orbit: 'orbit', release: 'breaking apart' };
+    this.setModeStatus(`AI · ${names[kind]}. A phrase is growing.`);
+    this.suggestNextContour();
+  }
+
+  advanceFormation() {
+    const index = (this.aiFormationIndex || 0) + 1;
+    if (this.aiFormation && this.aiFormation.kind === 'release') {
+      this.aiNodes().forEach(shape => this.removeShape(shape));
+    }
+    this.beginFormation(index);
+  }
+
+  ensureAiPopulation(count, spread) {
+    if (!this.audioContext) return;
+    const center = (this.aiFormation && this.aiFormation.center) || { x: 400, y: 400 };
+    let nodes = this.aiNodes();
+    while (nodes.length > count) {
+      this.removeShape(nodes.pop());
+      nodes = this.aiNodes();
+    }
+    const types = ['circle', 'yellowTriangle', 'triangle', 'square'];
+    while (nodes.length < count) {
+      const i = nodes.length;
+      const angle = spread ? (i === 0 ? Math.PI : 0) : (-Math.PI / 2 + i * (Math.PI * 2 / count));
+      const radius = spread ? 200 : 170;
+      const x = center.x + Math.cos(angle) * radius;
+      const y = center.y + Math.sin(angle) * radius;
+      const shape = this.createShapeAt(x, y, types[i % types.length]);
+      if (!shape) break;
+      shape.aiOwned = true;
+      shape.targetX = x;
+      shape.targetY = y;
+      nodes.push(shape);
+    }
+  }
+
+  stepAiLife() {
+    if (!this.aiLoopOn) return;
+    if (!this.audioContext) {
+      this.setModeStatus('AI is waking up. One click unlocks the sound.');
+      return;
+    }
+    if (!this.aiFormation) this.beginFormation(this.aiFormationIndex || 0);
+    const formation = this.aiFormation;
+    const elapsed = this.time.now - formation.started;
+    if (elapsed >= formation.duration) {
+      this.advanceFormation();
+      return;
+    }
+    const t = Math.max(0, Math.min(1, elapsed / formation.duration));
+    const ease = t * t * (3 - 2 * t);
+    if (!this.aiNodes().length) {
+      this.ensureAiPopulation(formation.kind === 'converge' ? 2 : 4, formation.kind === 'converge');
+    }
+    const nodes = this.aiNodes();
+    const center = formation.center;
+    nodes.forEach((shape, i) => {
+      shape.aiLead = i === 0;
+      let tx = center.x;
+      let ty = center.y;
+      if (formation.kind === 'converge') {
+        const gap = Phaser.Math.Linear(210, 42, ease);
+        const side = i % 2 === 0 ? -1 : 1;
+        tx = center.x + side * gap;
+        ty = center.y + (i > 1 ? side * 30 : 0);
+      } else if (formation.kind === 'cluster') {
+        const radius = Phaser.Math.Linear(150, 58, ease);
+        const ang = -Math.PI / 2 + i * (Math.PI * 2 / Math.max(nodes.length, 1));
+        tx = center.x + Math.cos(ang) * radius;
+        ty = center.y + Math.sin(ang) * radius;
+      } else if (formation.kind === 'orbit') {
+        const spin = elapsed / 1000 * 0.65;
+        const ang = spin + i * (Math.PI * 2 / Math.max(nodes.length, 1));
+        tx = center.x + Math.cos(ang) * 110;
+        ty = center.y + Math.sin(ang) * 78;
+      } else {
+        const ang = i * (Math.PI * 2 / Math.max(nodes.length, 1));
+        const radius = Phaser.Math.Linear(64, 230, ease);
+        tx = center.x + Math.cos(ang) * radius;
+        ty = center.y + Math.sin(ang) * radius;
+      }
+      shape.targetX = Math.max(this.playAreaLeft + 20, Math.min(this.playAreaRight - 20, tx));
+      shape.targetY = Math.max(this.playAreaTop + 20, Math.min(this.playAreaBottom - 20, ty));
+    });
+    const dt = Math.min(0.05, (this.game.loop.delta || 16) / 1000);
+    const follow = formation.kind === 'orbit' ? 3.2 : 1.6;
+    const k = 1 - Math.exp(-follow * dt);
+    nodes.forEach(shape => {
+      shape.x += ((shape.targetX || shape.x) - shape.x) * k;
+      shape.y += ((shape.targetY || shape.y) - shape.y) * k;
+      shape.i = Math.max(0, Math.min(this.gridCols - 1, Math.floor(shape.x / this.gridSize)));
+      shape.j = Math.max(0, Math.min(this.gridRows - 1, Math.floor(shape.y / this.gridSize)));
+      if (shape.graphics) shape.graphics.setPosition(shape.x, shape.y);
+    });
+  }
+
+  formationCloseness(nodes) {
+    if (!nodes || nodes.length < 2) return 0;
+    let total = 0;
+    let pairs = 0;
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        total += Phaser.Math.Distance.Between(nodes[i].x, nodes[i].y, nodes[j].x, nodes[j].y);
+        pairs++;
+      }
+    }
+    const avg = total / Math.max(pairs, 1);
+    return Math.max(0, Math.min(1, (220 - avg) / 170));
+  }
+
+  degreeToMidi(degree, octave) {
+    const pcs = this.scalePitchClasses();
+    const len = pcs.length || 1;
+    let d = degree;
+    let oct = octave;
+    while (d < 0) {
+      d += len;
+      oct -= 1;
+    }
+    oct += Math.floor(d / len);
+    return oct * 12 + pcs[d % len];
+  }
+
+  tickAiSong() {
+    const nodes = this.aiNodes();
+    if (!this.audioContext || this.audioContext.state !== 'running' || !nodes.length || !this.aiFormation) return;
+    const now = this.audioContext.currentTime;
+    const bpm = Math.max(52, Math.min(104, this.particleSpeedToBPM(this.particleSpeed)));
+    const beat = 60 / bpm;
+    if (this._nextSongBeat && now < this._nextSongBeat) return;
+    this._nextSongBeat = now + beat;
+    this.songBeat = (this.songBeat || 0) + 1;
+
+    const formation = this.aiFormation;
+    const call = [0, 2, 4, 2, 5, 4, 2, 0];
+    const answer = [4, 2, 0, 2, -1, 0, 2, 4];
+    const contour = this._activeContour && this._activeContour.length >= 4
+      ? this._activeContour
+      : (formation.phrase === 'answer' ? answer : call);
+    const root = [0, 5, 3, 4][formation.index % 4];
+    const step = contour[this.songBeat % contour.length];
+    const closeness = this.formationCloseness(nodes);
+    const resolving = formation.kind === 'release';
+
+    const leadMidi = resolving ? this.degreeToMidi(root, 4) : this.degreeToMidi(root + step, 4);
+    this.retuneShape(nodes[0], leadMidi, 0);
+    this.requestAccent(nodes[0], resolving ? 0.45 : 1, beat * 0.92);
+
+    if (nodes[1] && (closeness > 0.35 || formation.kind === 'cluster' || formation.kind === 'orbit')) {
+      const harmony = resolving ? this.degreeToMidi(root, 3) : this.degreeToMidi(root + 2, 4);
+      this.retuneShape(nodes[1], harmony, 0);
+      this.requestAccent(nodes[1], resolving ? 0.3 : 0.72, beat);
+    }
+    if (closeness > 0.62 || formation.kind === 'orbit' || formation.kind === 'cluster') {
+      nodes.slice(2).forEach((node, i) => {
+        const deg = [4, 2, 6][i % 3];
+        const midi = resolving ? this.degreeToMidi(root, 5) : this.degreeToMidi(root + deg, i % 2 === 0 ? 5 : 3);
+        this.retuneShape(node, midi, 0);
+        this.requestAccent(node, resolving ? 0.2 : 0.58, beat * 1.1);
+      });
+    }
+
+    const label = (this.chordColors[this.selectedChord] || {}).label || 'Chord';
+    const names = { converge: 'converging pair', cluster: 'cluster', orbit: 'orbit', release: 'resolving' };
+    const chordName = [0, 2, 4].map(deg => this.pitchName(this.degreeToMidi(root + deg, 4) % 12)).join(' ');
+    this.setModeStatus(`AI · ${names[formation.kind]} · ${label} · ${chordName}`);
+  }
+
+  async suggestNextContour() {
+    if (!this.magentaLoaded || !this.modelsLoaded || !this.music_rnn || typeof mm === 'undefined' || this._motifPending) return;
+    const nodes = this.aiNodes();
+    if (nodes.length < 2) return;
+    this._motifPending = true;
+    try {
+      const bpm = Math.max(52, this.particleSpeedToBPM(this.particleSpeed));
+      const chord = this.currentChordClasses();
+      const seedNotes = nodes.slice(0, 4).map((shape, index) => ({
+        pitch: shape.aiMidi || this.frequencyToMidi(shape.frequency),
+        startTime: index * 0.5,
+        endTime: index * 0.5 + 0.45
+      }));
+      const quantized = mm.sequences.quantizeNoteSequence({
+        notes: seedNotes,
+        totalTime: seedNotes.length * 0.5,
+        tempos: [{ time: 0, qpm: bpm }]
+      }, 4);
+      const continued = await this.music_rnn.continueSequence(quantized, 8, 0.45);
+      const degrees = (continued.notes || []).slice(0, 8).map(note => {
+        const snapped = this.snapPitch(note.pitch, chord);
+        const pc = ((snapped % 12) + 12) % 12;
+        const pcs = this.scalePitchClasses();
+        let best = 0;
+        let gap = 99;
+        pcs.forEach((candidate, index) => {
+          const d = Math.min((pc - candidate + 12) % 12, (candidate - pc + 12) % 12);
+          if (d < gap) {
+            gap = d;
+            best = index;
+          }
+        });
+        return best;
+      });
+      if (degrees.length >= 4 && this.playMode === 'ai') this._pendingContour = degrees;
+    } catch (error) {
+      console.warn('Magenta motif skipped; the written phrase continues', error);
+    } finally {
+      this._motifPending = false;
+    }
   }
 
   scheduleAiPhrase(seconds) {
@@ -1517,7 +1770,6 @@ class CosmiChordScene extends Phaser.Scene {
     }
     if (this._prevLinkCount !== links.length) {
       if (this._prevLinkCount != null && links.length > this._prevLinkCount) this._linkGrew = true;
-      if (this._prevLinkCount != null) this.aiChordStep = (this.aiChordStep || 0) + 1;
       this._prevLinkCount = links.length;
     }
     this.lifeLinks = links;
@@ -1774,12 +2026,40 @@ class CosmiChordScene extends Phaser.Scene {
     return 440 * Math.pow(2, (midi - 69) / 12);
   }
 
+  createShapeAt(x, y, type) {
+    if (!this.audioContext) return null;
+    let i = Math.max(0, Math.min(this.gridCols - 1, Math.floor(x / this.gridSize)));
+    let j = Math.max(0, Math.min(this.gridRows - 1, Math.floor(y / this.gridSize)));
+    for (let n = 0; n < 20 && this.shapes.some(shape => !shape.retiring && shape.i === i && shape.j === j); n++) {
+      i = Math.max(0, Math.min(this.gridCols - 1, i + 1));
+      if (i >= this.gridCols - 1) j = Math.max(0, Math.min(this.gridRows - 1, j + 1));
+    }
+    const sx = i * this.gridSize + this.gridSize / 2;
+    const sy = j * this.gridSize + this.gridSize / 2;
+    const shape = {
+      i, j, x: sx, y: sy,
+      radius: this.nodeRadius || 100,
+      type: type || 'circle',
+      visible: true,
+      baseVolume: 0
+    };
+    const frequencies = [...(this.chordColors[this.selectedChord] || {}).frequencies || this.defaultFrequencies];
+    const frequency = this.getFrequencyForType(shape.type, frequencies);
+    shape.oscillator = createOscillator(this.audioContext, frequency, this.getOscTypeForShape(shape.type));
+    if (!shape.oscillator) return null;
+    this.setupShapeAudio(shape, frequency);
+    shape.homeFrequency = frequency;
+    shape.graphics = this.add.graphics();
+    this.updateShapeGraphics(shape);
+    this.shapes.push(shape);
+    return shape;
+  }
+
   async placeShape(pointer, type) {
     try {
       await this.ensureAudio();
       if (!this.audioContext) return null;
-  
-      // Enkel gränskollidkontroll
+
       if (
         pointer.x < this.playAreaLeft ||
         pointer.x > this.playAreaRight ||
@@ -1788,51 +2068,15 @@ class CosmiChordScene extends Phaser.Scene {
       ) {
         return;
       }
-  
+
       const i = Math.floor(pointer.x / this.gridSize);
       const j = Math.floor(pointer.y / this.gridSize);
-      
-      // Kolla om det redan finns en form på platsen
-      const existingShape = this.shapes.find(shape => shape.i === i && shape.j === j);
+      const existingShape = this.shapes.find(shape => shape.i === i && shape.j === j && !shape.retiring);
       if (existingShape) {
-        // Ändra typ på befintlig nod eller ta bort den
         this.updateExistingShape(existingShape, i, j);
-        return;
+        return existingShape;
       }
-  
-      // Skapa ny shape
-      let shape = {};
-      shape.i = i;
-      shape.j = j;
-      shape.x = i * this.gridSize + this.gridSize / 2;
-      shape.y = j * this.gridSize + this.gridSize / 2;
-      shape.radius = this.nodeRadius || 100;
-      shape.type = type || 'circle';
-      shape.visible = true;
-      shape.baseVolume = 0;
-  
-      // Frekvens- och ljudinställningar
-      const frequencies = [...this.chordColors[this.selectedChord]?.frequencies || this.defaultFrequencies];
-      let frequency = this.getFrequencyForType(shape.type, frequencies);
-      
-      // Enkelt ljud setup
-      shape.oscillator = createOscillator(this.audioContext, frequency, this.getOscTypeForShape(shape.type));
-      if (!shape.oscillator) {
-        console.error('Failed to create oscillator');
-        return;
-      }
-  
-      this.setupShapeAudio(shape, frequency);
-      shape.homeFrequency = frequency;
-  
-      // Enkel grafik
-      shape.graphics = this.add.graphics();
-      this.updateShapeGraphics(shape);
-  
-      // Lägg till i shapes
-      this.shapes.push(shape);
-  
-      return shape;
+      return this.createShapeAt(pointer.x, pointer.y, type || this.selectedNoteType);
     } catch (err) {
       console.error("Error in placeShape:", err);
       return null;
@@ -1876,10 +2120,12 @@ class CosmiChordScene extends Phaser.Scene {
   // Hjälpmetod för att ta bort shapes säkert
   removeShape(shape) {
     try {
-      // Säkert ta bort
-      if (shape.gain) {
+      if (!shape || shape.retiring) return;
+      shape.retiring = true;
+      shape.accent = 0;
+      if (shape.gain && this.audioContext) {
         shape.gain.gain.cancelScheduledValues(this.audioContext.currentTime);
-        shape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.01);
+        shape.gain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.05);
       }
       
       // Förenklad cleanup efter kort fördröjning

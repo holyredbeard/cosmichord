@@ -39,6 +39,19 @@ export function createUI(scene) {
     `;
     sliderContainer.appendChild(audioBlock);
 
+    const modeBlock = document.createElement('div');
+    modeBlock.className = 'button-row';
+    modeBlock.innerHTML = `
+      <button id="manualModeButton" class="control-button mode-button is-active" type="button">Manual</button>
+      <button id="aiModeButton" class="control-button mode-button" type="button">AI</button>
+    `;
+    sliderContainer.appendChild(modeBlock);
+    const modeStatus = document.createElement('p');
+    modeStatus.id = 'modeStatus';
+    modeStatus.className = 'audio-hint';
+    modeStatus.textContent = 'Manual. Place orbs and shape the sound yourself.';
+    sliderContainer.appendChild(modeStatus);
+
     const particleCountContainer = document.createElement('div');
     particleCountContainer.className = 'slider-item';
     particleCountContainer.innerHTML = `
@@ -208,6 +221,8 @@ export function handleUIEvents(scene) {
         if (index < frequencies.length) {
           // Uppdatera frekvensen för denna shape
           shape.frequency = frequencies[index];
+          shape.homeFrequency = shape.frequency;
+          shape._freqTarget = shape.frequency;
           
           // Uppdatera oscillatorn
           if (shape.oscillator) {
